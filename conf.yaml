@@ -1,0 +1,28 @@
+# /etc sync targets. hosts keys become infra/<host>/etc paths.
+hosts:
+  s1: isucon-s1
+  s2: isucon-s2
+
+# Common paths for all hosts. Files and directories are both supported.
+includes:
+  - /etc/sysctl.conf
+  - /etc/sysctl.d
+  - /etc/security/limits.conf
+  - /etc/hosts
+
+excludes:
+  - "*.bak"
+  - "*.sock"
+
+# Extra paths per host. Use this when roles differ between servers.
+host_includes:
+  s1:
+    - /etc/nginx/nginx.conf
+    - /etc/mysql/mysql.conf.d/mysqld.cnf
+  s2:
+    - /etc/systemd/system
+    - /etc/nginx/sites-enabled
+
+host_excludes:
+  s1:
+    - "*.tmp"
