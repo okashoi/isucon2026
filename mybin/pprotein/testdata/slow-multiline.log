@@ -1,0 +1,18 @@
+2026-10-31 02:44:15.015 UTC [67544] isureal@isureal LOG:  duration: 0.462 ms  statement: 
+			SELECT s.user_id, s.token_hash, s.created_at, u.region
+			FROM login_sessions s JOIN users u ON u.id = s.user_id
+			WHERE s.token_hash =  '02952f083cde9825fbcbe5d85adf16168f3e0292bc94e02d00c79dd00686e243' 
+			  AND s.active = true AND u.status = 'active'
+		
+2026-10-31 02:44:15.037 UTC [67544] isureal@isureal LOG:  duration: 3.895 ms  statement: 
+	  SELECT p.id, p.author_id, p.posting_window_id, p.image_id, p.caption, p.visibility,
+	  p.location_kind, p.latitude, p.longitude, p.locality, p.posted_at,
+	  w.on_time_deadline, w.ended_at AS window_ended_at, u.id AS "author.id", u.username AS "author.username", u.secret_key_hash AS "author.secret_key_hash", u.display_name AS "author.display_name", u.bio AS "author.bio", u.profile_image_id AS "author.profile_image_id", u.region AS "author.region", u.account_type AS "author.account_type", u.status AS "author.status"
+	  FROM posts p
+	  JOIN posting_windows w ON w.id = p.posting_window_id
+	  JOIN users u ON u.id = p.author_id AND u.status = 'active'
+	  WHERE p.deleted_at IS NULL 
+	   AND p.author_id <>  '748ecfb0-9fce-4e70-979d-d341e60b0635'  AND w.ended_at IS NULL
+	   AND ( null ::timestamptz IS NULL OR (p.posted_at, p.id) < ( null ,  '' ))
+	   ORDER BY p.posted_at DESC, p.id DESC
+	  
