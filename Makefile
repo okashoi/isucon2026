@@ -1,12 +1,16 @@
 # アプリ配布・再起動（issue #13）
 #
 # 前提: 競技ホスト上（または isucon-s* に ssh できるマシン）で実行する。
-# 配布先: APP_HOSTS（asia1/europe1/america1 = s1/s2/s3）。s4 は共有 PostgreSQL primary。
+# 配布先: APP_HOSTS（asia1/europe1/america1 = s1/s2/s3）。
+# s4（asia2）は共有 PostgreSQL primary。asia アプリの 2 台目としても使う。
 # s2/s3 は同期スタンバイ。配置先: REMOTE_APP_BIN（isureal-go.service の ExecStart と一致）
 #
-#   make deploy   # ビルド → 各 APP_HOSTS へ rsync → systemctl restart（PG は触らない。チーム作業向き）
-#   make gogo     # 全 APP 停止 → スタンバイ/primary 停止 → ビルド → 配布 → ログ消去 → PG/APP/nginx 起動
-#                 # stop-the-world。チームのベンチと被せないこと。
+#   make deploy     # ビルド → APP_HOSTS へ rsync → systemctl restart（PG は触らない）
+#   make deploy/s4  # ビルド → s4 へ配布 → isureal-go 再起動（PostgreSQL は触らない）
+#   make start/s4   # s4 の isureal-go を enable --now
+#   make stop/s4    # s4 の isureal-go を stop（PostgreSQL は触らない）
+#   make gogo       # 全 APP 停止 → スタンバイ/primary 停止 → ビルド → 配布 → ログ消去 → PG/APP/nginx 起動
+#                   # stop-the-world。チームのベンチと被せないこと。
 #   make replica/ensure               # streaming / 同期 / READ_HOST を冪等にそろえる
 #   make replica/basebackup/europe1   # 未構築時のみ basebackup（FORCE=1 で取り直し）
 #   make replica/basebackup/america1
@@ -29,6 +33,8 @@ gogo: stop-services deploy/sync logs/clear start-services
 
 stop-services:
 	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo systemctl stop nginx $(APPNAME)";)
+	# s4 上の asia 二台目アプリ（動いていれば）。PostgreSQL より先に止める。
+	ssh $(DB_HOST) "sudo systemctl stop $(APPNAME) 2>/dev/null || true"
 	$(foreach h,$(STANDBY_DB_HOSTS),ssh $(h) "sudo systemctl stop postgresql";)
 	ssh $(DB_HOST) "sudo systemctl stop postgresql"
 
@@ -38,6 +44,7 @@ build:
 # ビルドしてバイナリだけ配る（サービスは触らない）。gogo から呼ぶ。
 deploy/sync: build
 	$(foreach h,$(APP_HOSTS),rsync -az $(APP_BIN) $(h):$(REMOTE_APP_BIN);)
+	rsync -az $(APP_BIN) $(DB_HOST):$(REMOTE_APP_BIN)
 
 # ビルド → 配布 → 再起動（nginx / PostgreSQL は触らない）
 # 実行中バイナリの ETXTBSY を避けるため .new 経由で差し替える。
@@ -46,6 +53,23 @@ deploy: build
 		rsync -az $(APP_BIN) $$h:$(REMOTE_APP_BIN).new && \
 		ssh $$h "mv $(REMOTE_APP_BIN).new $(REMOTE_APP_BIN) && sudo systemctl restart $(APPNAME)"; \
 	done
+
+# s4 へバイナリ配布して isureal-go を再起動する。直前バイナリは .prev に残す。
+deploy/s4: build
+	rsync -az $(APP_BIN) $(DB_HOST):$(REMOTE_APP_BIN).new
+	ssh $(DB_HOST) "\
+		if [ -e $(REMOTE_APP_BIN) ]; then cp -a $(REMOTE_APP_BIN) $(REMOTE_APP_BIN).prev; fi; \
+		mv $(REMOTE_APP_BIN).new $(REMOTE_APP_BIN) && \
+		sudo systemctl daemon-reload && \
+		sudo systemctl restart $(APPNAME)"
+
+# s4 のアプリだけ起動（初回は enable もする）。PostgreSQL は触らない。
+start/s4:
+	ssh $(DB_HOST) "sudo systemctl daemon-reload && sudo systemctl enable --now $(APPNAME)"
+
+# s4 のアプリだけ停止。切り戻しで nginx を s1 のみに戻したあとに使う。
+stop/s4:
+	ssh $(DB_HOST) "sudo systemctl stop $(APPNAME)"
 
 # 初期データの画像を asia1 で DB から書き出し、europe1 / america1 へ配る。画像の取得とエクスポートが使う。
 # 初期化では書き出さないので、アプリの起動後、ベンチの前に実行する。足りないファイルだけを扱うので繰り返してよい。
@@ -73,6 +97,8 @@ start-services:
 	ssh $(DB_HOST) "sudo systemctl start postgresql"
 	$(foreach h,$(STANDBY_DB_HOSTS),ssh $(h) "sudo systemctl start postgresql";)
 	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo systemctl daemon-reload && sudo systemctl start $(APPNAME) && sudo systemctl start nginx";)
+	# asia 二台目。未 enable / バイナリ無しでも gogo 全体は落とさない。
+	ssh $(DB_HOST) "sudo systemctl start $(APPNAME) 2>/dev/null || true"
 
 etc-sync/pull:
 	./mybin/etc-sync/etc-sync.sh pull
