@@ -112,22 +112,14 @@ func InvalidateLoginSession(db *sqlx.DB, userID string, tokenHash string) (strin
 	return region, nil
 }
 
-// replaceLoginSession は有効なセッションを新しいものに置き換えてトークンを返す。
-// 有効なセッションが複数残らないよう、呼び出し元が users 行をロックしておく。
-func replaceLoginSession(ctx context.Context, tx *sqlx.Tx, userID string) (string, error) {
+// loginUser は認証に成功したら、有効なセッションを新しいものに置き換えてトークンを返す。
+// 認証に失敗したら sql.ErrNoRows を返す。
+func loginUser(ctx context.Context, db sqlx.QueryerContext, username, secretKey string) (User, string, error) {
+	secretKeyHash := sha256.Sum256([]byte(secretKey))
 	token := uuid.NewString()
-	tokenHashBytes := sha256.Sum256([]byte(token))
-	tokenHash := hex.EncodeToString(tokenHashBytes[:])
-	if _, err := tx.ExecContext(ctx, `
-  WITH replaced AS (
-    UPDATE login_sessions
-    SET active = false, invalidated_at = clock_timestamp(), reason = 'replaced'
-    WHERE user_id = $1 AND active = true
-  )
-  INSERT INTO login_sessions (id, user_id, token_hash)
-  VALUES ($2, $1, $3)
- `, userID, uuid.NewString(), tokenHash); err != nil {
-		return "", fmt.Errorf("failed to replace session: %w", err)
-	}
-	return token, nil
+	tokenHash := sha256.Sum256([]byte(token))
+	var user User
+	err := sqlx.GetContext(ctx, db, &user, `SELECT `+userColumnList+` FROM login_user($1, $2, $3)`,
+		username, hex.EncodeToString(secretKeyHash[:]), hex.EncodeToString(tokenHash[:]))
+	return user, token, err
 }

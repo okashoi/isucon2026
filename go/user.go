@@ -42,6 +42,8 @@ func validRegion(region string) bool {
 
 var userColumns = []string{"id", "username", "secret_key_hash", "display_name", "bio", "profile_image_id", "region", "account_type", "status"}
 
+var userColumnList = strings.Join(userColumns, ", ")
+
 func userColumnsAs(alias, prefix string) string {
 	columns := make([]string, len(userColumns))
 	for i, column := range userColumns {
@@ -56,7 +58,7 @@ func (user *User) setImageKey() error {
 	return err
 }
 
-var activeUserQuery = `SELECT ` + strings.Join(userColumns, ", ") + ` FROM users WHERE id = $1 AND status = 'active'`
+var activeUserQuery = `SELECT ` + userColumnList + ` FROM users WHERE id = $1 AND status = 'active'`
 
 func getUser(ctx context.Context, db sqlx.QueryerContext, userID string) (User, error) {
 	return queryUser(ctx, db, activeUserQuery, userID)
