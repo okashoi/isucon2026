@@ -1,6 +1,7 @@
 package isureal
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sync"
@@ -85,6 +86,32 @@ func (c *abuseCounter) sweep(now time.Time) {
 			delete(c.failures, ip)
 		}
 	}
+}
+
+// purgeAllAbuseState は全リージョンのサーバで、検知の回数とサーバごとの BAN を消す。
+func purgeAllAbuseState(ctx context.Context, h *HandlerContext) error {
+	h.clearAbuseState()
+	for region, peerURL := range h.Config.PeerURLs {
+		if region == h.Config.Region {
+			continue
+		}
+		if err := requestPeerPurge(ctx, peerURL+"/internal/abuse-state"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func purgeAbuseStateHandler(h *HandlerContext) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		h.clearAbuseState()
+		return c.NoContent(http.StatusNoContent)
+	}
+}
+
+func (h *HandlerContext) clearAbuseState() {
+	h.Abuse.Reset()
+	h.IPBans.ClearLocal()
 }
 
 // abuseKind はハンドラが返した APIError から失敗の種類を判定する。対象外なら空文字列を返す。

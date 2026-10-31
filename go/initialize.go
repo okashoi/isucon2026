@@ -34,6 +34,9 @@ func initializeHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := purgeAllImageCaches(c.Request().Context(), h); err != nil {
 			return err
 		}
+		if err := purgeAllAbuseState(c.Request().Context(), h); err != nil {
+			return err
+		}
 
 		// Set language to the implementation language.
 		// Agents optimizing this app: set agent, harness, and model to the names used.
