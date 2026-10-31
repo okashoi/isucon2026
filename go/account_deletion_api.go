@@ -29,8 +29,9 @@ func deleteAccountHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		// 行ロックのあとでリージョンを取る。期間開始は行をロックしないので、逆順だとデッドロックする。
-		if err := lockRegionMemberships(ctx, tx, locked.Region); err != nil {
+		// 行ロックのあとでリージョンを共有で取る。期間開始は排他なので待ち、退会どうしは並走する。
+		// 期間開始は行をロックしないので、逆順だとデッドロックする。
+		if err := lockRegionMembershipsShared(ctx, tx, locked.Region); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE users SET status='deleted', deleted_at=clock_timestamp(), updated_at=clock_timestamp() WHERE id=$1`, userID); err != nil {
