@@ -23,10 +23,11 @@ excludes:
   - "*.bak"
   - "*.sock"
 
-# Extra paths per host when roles differ, e.g.:
-# host_includes:
-#   s1:
-#     - /etc/systemd/system
-# host_excludes:
-#   s1:
-#     - "*.tmp"
+# アプリサーバだけ。drop-in で標準出力を捨てる。
+host_includes:
+  s1:
+    - /etc/systemd/system/isureal-go.service.d
+  s2:
+    - /etc/systemd/system/isureal-go.service.d
+  s3:
+    - /etc/systemd/system/isureal-go.service.d
