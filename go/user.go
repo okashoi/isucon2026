@@ -55,10 +55,19 @@ func (user *User) setImageKey() error {
 	return err
 }
 
+var activeUserQuery = `SELECT ` + strings.Join(userColumns, ", ") + ` FROM users WHERE id = $1 AND status = 'active'`
+
 func getUser(ctx context.Context, db sqlx.QueryerContext, userID string) (User, error) {
+	return queryUser(ctx, db, activeUserQuery, userID)
+}
+
+func lockUser(ctx context.Context, tx *sqlx.Tx, userID string) (User, error) {
+	return queryUser(ctx, tx, activeUserQuery+` FOR NO KEY UPDATE`, userID)
+}
+
+func queryUser(ctx context.Context, db sqlx.QueryerContext, query, userID string) (User, error) {
 	var user User
-	err := sqlx.GetContext(ctx, db, &user, `SELECT `+strings.Join(userColumns, ", ")+` FROM users WHERE id = $1 AND status = 'active'`, userID)
-	if err != nil {
+	if err := sqlx.GetContext(ctx, db, &user, query, userID); err != nil {
 		return user, err
 	}
 	return user, user.setImageKey()

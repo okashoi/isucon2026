@@ -174,10 +174,6 @@ func deleteRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		var lockedID string
-		if err := tx.GetContext(ctx, &lockedID, `SELECT id FROM users WHERE id=$1 FOR NO KEY UPDATE`, actor); err != nil {
-			return err
-		}
 		var record struct {
 			ReactorID string `db:"reactor_id"`
 			AuthorID  string `db:"author_id"`
