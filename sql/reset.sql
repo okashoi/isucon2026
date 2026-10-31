@@ -239,4 +239,53 @@ BEGIN
 END;
 $$;
 
+-- 投稿枠は users 行のロックでユーザー単位に直列化する。VOLATILE なので、件数はロックを待ったあとのスナップショットで数える。
+-- ウィンドウ行は FOR SHARE にし、別ユーザーの投稿を並ばせない。期間終了の UPDATE とは衝突する。
+-- 呼び出し元の文のスナップショットはロックを待つ前に決まるので、応答に使う行はここで読んだものを返す。
+-- 投稿枠が空いていなければ行を返さない。
+CREATE OR REPLACE FUNCTION create_post(
+  p_author_id text,
+  p_image_id text,
+  p_caption text,
+  p_visibility text,
+  p_location_kind text,
+  p_latitude numeric,
+  p_longitude numeric,
+  p_locality text,
+  OUT new_post posts,
+  OUT post_window posting_windows,
+  OUT author users
+) RETURNS SETOF record LANGUAGE plpgsql AS $$
+DECLARE
+  v_active_posts bigint;
+  v_deleted_posts bigint;
+  v_posted_at timestamptz;
+BEGIN
+  SELECT * INTO STRICT author FROM users WHERE id = p_author_id AND status = 'active' FOR NO KEY UPDATE;
+
+  SELECT * INTO post_window FROM posting_windows WHERE region = author.region AND ended_at IS NULL FOR SHARE;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  SELECT count(*) FILTER (WHERE p.deleted_at IS NULL), count(*) FILTER (WHERE p.deleted_at IS NOT NULL)
+  INTO v_active_posts, v_deleted_posts
+  FROM posts p JOIN posting_windows w ON w.id = p.posting_window_id
+  WHERE p.author_id = p_author_id AND w.local_date = post_window.local_date;
+
+  v_posted_at := clock_timestamp();
+  IF v_active_posts <> 0 OR v_deleted_posts >= 2 OR v_posted_at < post_window.starts_at THEN
+    RETURN;
+  END IF;
+
+  INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility,
+                     location_kind, latitude, longitude, locality, posted_at)
+  VALUES (gen_random_uuid(), p_author_id, post_window.id, p_image_id, p_caption, p_visibility,
+          p_location_kind, p_latitude, p_longitude, p_locality, v_posted_at)
+  RETURNING * INTO new_post;
+
+  RETURN NEXT;
+END;
+$$;
+
 COMMIT;
