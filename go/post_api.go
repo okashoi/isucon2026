@@ -82,8 +82,7 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
-		// 画像の書き込みはウィンドウ行をロックしない。投稿の確定だけ create_post の 1 文で行う。
-		// 画像 INSERT だけ synchronous_commit=local。投稿の remote_apply コミット時点で画像 WAL も適用済み。
+		// 本体は先に全アプリへ配る。空 data なら WAL は小さい。配布失敗時だけ本体を DB に入れ、synchronous_commit=local で送る。
 		imageID := uuid.NewString()
 		imageCreatedAt := time.Now().UTC()
 		imageBody := h.PostImages.Replicate(ctx, imageID, imageData)()
