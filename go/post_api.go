@@ -83,9 +83,10 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
 		// 画像の書き込みはウィンドウ行をロックしない。投稿の確定だけ create_post の 1 文で行う。
+		// 画像 INSERT だけ synchronous_commit=local。投稿の remote_apply コミット時点で画像 WAL も適用済み。
 		imageID := uuid.NewString()
 		imageCreatedAt := time.Now().UTC()
-		if _, err := h.DB.ExecContext(ctx, `INSERT INTO image_objects (id, owner_user_id, data, media_type, created_at) VALUES ($1, $2, $3, 'image/jpeg', $4)`, preparedQuery, imageID, userID, imageData, imageCreatedAt); err != nil {
+		if err := insertImageObjectLocalSync(ctx, h.DB, imageID, userID, imageData, imageCreatedAt); err != nil {
 			return err
 		}
 		keepImage := false
@@ -94,7 +95,7 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 				return
 			}
 			// INSERT と同じ binary 形式で created_at を渡す。text 形式だとナノ秒が丸められて一致しないことがある。
-			_, _ = h.DB.ExecContext(context.Background(), `DELETE FROM image_objects WHERE id = $1 AND created_at = $2`, preparedQuery, imageID, imageCreatedAt)
+			_ = deleteImageObjectLocalSync(context.Background(), h.DB, imageID, imageCreatedAt)
 		}()
 
 		post, err := createPost(ctx, h.DB, userID, imageID, input.Caption, input.Visibility, location)
