@@ -8,6 +8,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS username_norm text;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name_norm text;
 ALTER TABLE initial_users ADD COLUMN IF NOT EXISTS username_norm text;
 ALTER TABLE initial_users ADD COLUMN IF NOT EXISTS display_name_norm text;
+-- 実行中に投稿した画像はバイト列を DB に書かず（data は空）、書き込んだサーバのローカルにだけ置く。そのサーバのリージョン。
+ALTER TABLE image_objects ADD COLUMN IF NOT EXISTS origin_region text;
 
 TRUNCATE ip_bans, login_sessions, administrator_sessions, friendships, friend_requests, follows, block_relations;
 
@@ -243,9 +245,12 @@ $$;
 -- ウィンドウ行は FOR SHARE にし、別ユーザーの投稿を並ばせない。期間終了の UPDATE とは衝突する。
 -- 呼び出し元の文のスナップショットはロックを待つ前に決まるので、応答に使う行はここで読んだものを返す。
 -- 投稿枠が空いていなければ行を返さない。
+-- 画像の行も同じトランザクションで書く。バイト列は DB に書かず、p_image_origin のサーバのローカルにある。
+DROP FUNCTION IF EXISTS create_post(text, text, text, text, text, numeric, numeric, text);
 CREATE OR REPLACE FUNCTION create_post(
   p_author_id text,
   p_image_id text,
+  p_image_origin text,
   p_caption text,
   p_visibility text,
   p_location_kind text,
@@ -277,6 +282,9 @@ BEGIN
   IF v_active_posts <> 0 OR v_deleted_posts >= 2 OR v_posted_at < post_window.starts_at THEN
     RETURN;
   END IF;
+
+  INSERT INTO image_objects (id, owner_user_id, data, media_type, origin_region)
+  VALUES (p_image_id, p_author_id, '', 'image/jpeg', p_image_origin);
 
   INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility,
                      location_kind, latitude, longitude, locality, posted_at)
