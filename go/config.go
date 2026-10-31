@@ -36,7 +36,7 @@ func ConfigFromEnv() *Config {
 		DBUser:     envOrDefault("ISUREAL_DB_USER", "isureal"),
 		DBPassword: envOrDefault("ISUREAL_DB_PASSWORD", "isureal"),
 		DBName:     envOrDefault("ISUREAL_DB_NAME", "isureal"),
-		LogLevel:   envOrDefault("ISUREAL_LOG_LEVEL", "debug"),
+		LogLevel:   envOrDefault("ISUREAL_LOG_LEVEL", "error"),
 		PeerURLs: map[string]string{
 			"asia":    envOrDefault("ISUREAL_PEER_URL_ASIA", "http://192.168.1.10:8080"),
 			"europe":  envOrDefault("ISUREAL_PEER_URL_EUROPE", "http://192.168.2.10:8080"),

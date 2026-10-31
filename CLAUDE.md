@@ -51,6 +51,7 @@ make isubench/check           # 録画した通信を再生して正常版と比
 - `go/server.go` の `NewServer` が DB 接続とルーティングのすべてを持つ。ハンドラは `xxxHandler(h *HandlerContext) echo.HandlerFunc` の形で、API ごとの `*_api.go` にある。ドメインごとの DB アクセスは `post.go`、`user.go`、`comment.go` などに置き、`sqlx.QueryerContext` を受けて DB でもトランザクションでも呼べるようにしている。
 - 大半のルートに `SessionMiddleware` と `RegionMiddleware` が付く。ログイン中の利用者のリージョンがサーバの `ISUREAL_REGION` と違うと `403 region_mismatch` になる。全リクエストに `IPBanMiddleware` が付き、`ip_bans` を 200ms ごとに読み直す。
 - 攻撃の検知は `AbuseBanMiddleware`（`go/abuse.go`）が担う。検知したサーバは直ちにメモリで BAN し、`ip_bans` への書き込みで他のサーバへ伝える。回数と BAN は `POST /api/initialize` で全サーバから消す。
+- アクションログの既定レベルは `error` で、5xx だけを出力する。通信を調べるときは `ISUREAL_LOG_LEVEL=debug` にする。
 - セッションは `SessionCache` にキャッシュする。各サーバが持つのは自リージョンの利用者の分だけで、セッションや所属リージョンを変更する処理は、commit のあと応答を返す前に `purgeUserSession` で所属リージョンのサーバの分を破棄する。
 - エラーは `NewAPIError` で返す。それ以外のエラーは `APIErrorHandler` が処理する。
 - `GET /api/notifications` は SSE で、接続を保持せず 500ms ごとに DB をポーリングする。通知は `posting_windows` から導出し、`notifications` テーブルは読み書きしない。テーブルは `sql/003-initial-snapshot.sql` が参照するので残している。

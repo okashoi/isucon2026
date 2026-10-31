@@ -126,7 +126,7 @@
 
 ### 施策9: ミドルウェア・設定のチューニング【効果: 中 / 序盤】
 
-- ログ: `ISUREAL_LOG_LEVEL` 既定 debug（[go/config.go:27](../go/config.go#L27)）で全 GET を JSON ログ出力 → `info` に上げる（abuse と書き込み系・エラーは残る。abuse 観測のため error までは上げない）。
+- ログ: `ISUREAL_LOG_LEVEL` 既定 error（[go/config.go:39](../go/config.go#L39)）で 5xx だけを JSON ログ出力する。攻撃の検知は `AbuseBanMiddleware` が行うのでログに依存しない。通信を調べるときは `debug` にする。
 - DB 接続: `SetMaxOpenConns(30)`（[go/server.go:34](../go/server.go#L34)）。WAN 越しのクエリは接続を長く占有するため、PostgreSQL の max_connections と合わせて引き上げる（3アプリサーバ合計で считать）。
 - PostgreSQL (asia2): shared_buffers / wal_buffers / checkpoint 設定、`synchronous_commit = off` は定番だが、追試の「再起動後にデータが取得できるか」は正常再起動なので WAL フラッシュされる。OS クラッシュ時のみリスク。導入するなら終盤ではなく早めに入れて安定性を見る。
 - nginx: keepalive、`/assets` の静的配信（内容は変更不可だが配信方法は自由）、client_max_body_size（画像アップロードは最大 4096×4096 JPEG）。
