@@ -48,4 +48,69 @@ CREATE INDEX IF NOT EXISTS users_region_status ON users(region, status);
 CREATE INDEX IF NOT EXISTS users_status_username_id ON users(status, username, id);
 CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users (username);
 
+-- VOLATILE なので文ごとにスナップショットを取り直し、advisory lock を待ったあとの文は最新の関係を読む。
+-- p_pair_key は Go の userPairAdvisoryKey の値で、lockUserPair と同じペアを直列化する。
+-- result は ok / not_found / conflict で、ok のときだけ relation_* が入る。
+CREATE OR REPLACE FUNCTION create_friend_request(
+  p_actor text,
+  p_target text,
+  p_pair_key bigint,
+  OUT result text,
+  OUT relation_id text,
+  OUT relation_status text,
+  OUT relation_updated_at timestamptz
+) LANGUAGE plpgsql AS $$
+DECLARE
+  v_active_users integer;
+  v_pending_id text;
+  v_pending_requester_id text;
+BEGIN
+  PERFORM pg_advisory_xact_lock(p_pair_key);
+
+  SELECT count(*) INTO v_active_users FROM (
+    SELECT 1 FROM users
+    WHERE id IN (p_actor, p_target) AND status = 'active'
+    ORDER BY id
+    FOR KEY SHARE
+  ) AS locked;
+  IF v_active_users <> 2 THEN
+    result := 'not_found';
+    RETURN;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM block_relations
+    WHERE (blocker_id = p_actor AND blocked_id = p_target) OR (blocker_id = p_target AND blocked_id = p_actor)
+  ) OR EXISTS (
+    SELECT 1 FROM friendships
+    WHERE user_low_id = LEAST(p_actor, p_target) AND user_high_id = GREATEST(p_actor, p_target)
+  ) THEN
+    result := 'conflict';
+    RETURN;
+  END IF;
+
+  SELECT id, requester_id INTO v_pending_id, v_pending_requester_id FROM friend_requests
+  WHERE status = 'pending'
+    AND ((requester_id = p_actor AND recipient_id = p_target) OR (requester_id = p_target AND recipient_id = p_actor))
+  LIMIT 1;
+
+  IF v_pending_id IS NULL THEN
+    INSERT INTO friend_requests (id, requester_id, recipient_id, status, created_at, updated_at)
+    VALUES (gen_random_uuid(), p_actor, p_target, 'pending', clock_timestamp(), clock_timestamp())
+    RETURNING id, status, updated_at INTO relation_id, relation_status, relation_updated_at;
+  ELSIF v_pending_requester_id = p_actor THEN
+    result := 'conflict';
+    RETURN;
+  ELSE
+    UPDATE friend_requests SET status = 'accepted', updated_at = clock_timestamp()
+    WHERE id = v_pending_id
+    RETURNING id, status, updated_at INTO relation_id, relation_status, relation_updated_at;
+    INSERT INTO friendships (id, user_low_id, user_high_id, source_request_id)
+    VALUES (gen_random_uuid(), LEAST(p_actor, p_target), GREATEST(p_actor, p_target), v_pending_id);
+  END IF;
+
+  result := 'ok';
+END;
+$$;
+
 COMMIT;
