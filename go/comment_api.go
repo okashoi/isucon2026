@@ -49,13 +49,8 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		if actor != post.AuthorID {
-			if _, err := lockUserPair(ctx, tx, actor, post.AuthorID); err != nil {
-				return err
-			}
-		}
-		var lockedID string
-		if err := tx.GetContext(ctx, &lockedID, `SELECT id FROM users WHERE id=$1 FOR NO KEY UPDATE`, actor); err != nil {
+		// 在籍は canComment が判定する。
+		if _, err := lockUserPair(ctx, tx, actor, post.AuthorID); err != nil {
 			return err
 		}
 		allowed, err := canComment(ctx, tx, actor, post.ID)
