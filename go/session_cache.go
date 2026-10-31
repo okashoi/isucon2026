@@ -37,6 +37,8 @@ func (c *SessionCache) Get(tokenHash string) (*Session, bool) {
 }
 
 // Generation は DB からセッションを読む前に取得して Add に渡す。
+// 破棄より後に読んだ値には commit が反映されている前提で、スタンバイから読むときは
+// synchronous_commit = remote_apply がそれを保証する。
 func (c *SessionCache) Generation() uint64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
