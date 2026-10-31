@@ -40,4 +40,11 @@ SELECT id, follower_id, followee_id, created_at, updated_at FROM initial_follows
 INSERT INTO block_relations (id, blocker_id, blocked_id, created_at)
 SELECT id, blocker_id, blocked_id, created_at FROM initial_block_relations;
 
+CREATE INDEX IF NOT EXISTS posts_image_id_author_id ON posts(image_id, author_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS posts_author_posted_at_id ON posts(author_id, posted_at, id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS realmojis_image_id_reactor_id ON realmojis(image_id, reactor_id) WHERE replaced_at IS NULL AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS friendships_user_high_id ON friendships(user_high_id);
+CREATE INDEX IF NOT EXISTS users_region_status ON users(region, status);
+CREATE INDEX IF NOT EXISTS users_status_username_id ON users(status, username, id);
+
 COMMIT;
