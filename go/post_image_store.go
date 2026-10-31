@@ -3,12 +3,13 @@ package isureal
 import (
 	"context"
 	"errors"
-	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/labstack/echo/v5"
 )
 
 // 投稿画像の JPEG をアプリサーバーのローカルに置く。
@@ -21,7 +22,8 @@ type PostImageStore struct {
 func NewPostImageStore() (*PostImageStore, error) {
 	dir := os.Getenv("ISUREAL_POST_IMAGE_DIR")
 	if dir == "" {
-		dir = filepath.Join(os.TempDir(), "isureal-post-images")
+		// 作業ディレクトリは go/ なので webapp/post-images になる。make post-images/sync もここへ配る。
+		dir = "../post-images"
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -76,37 +78,37 @@ func (s *PostImageStore) save(id string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
-// ResetFromDB はディレクトリを空にして、未削除投稿が参照する画像だけを書き直す。
-func (s *PostImageStore) ResetFromDB(ctx context.Context, db *sqlx.DB) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := os.RemoveAll(s.dir); err != nil {
+// FillMissing は未削除投稿が参照する画像のうち、ファイルが無いものだけを DB から書き出す。
+// 画像は ID ごとに中身が変わらないので、置いたファイルは消さない。
+func (s *PostImageStore) FillMissing(ctx context.Context, db *sqlx.DB) error {
+	var ids []string
+	if err := db.SelectContext(ctx, &ids, `SELECT DISTINCT image_id FROM posts WHERE deleted_at IS NULL`); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
-		return err
-	}
-	rows, err := db.QueryxContext(ctx, `
-   SELECT i.id, i.data
-   FROM image_objects i
-   WHERE i.id IN (SELECT image_id FROM posts WHERE deleted_at IS NULL)
-  `, preparedQuery)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var data []byte
-		if err := rows.Scan(&id, &data); err != nil {
+	var missing []string
+	for _, id := range ids {
+		path, err := s.path(id)
+		if err != nil {
 			return err
 		}
-		if err := s.save(id, data); err != nil {
+		if _, err := os.Stat(path); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+		missing = append(missing, id)
 	}
-	return rows.Err()
+	for len(missing) > 0 {
+		n := min(len(missing), fillBatchSize)
+		if err := s.loadFromDB(ctx, db, missing[:n], nil); err != nil {
+			return err
+		}
+		missing = missing[n:]
+	}
+	return nil
 }
+
+const fillBatchSize = 500
 
 func (s *PostImageStore) Bytes(ctx context.Context, db *sqlx.DB, ids []string) (map[string][]byte, error) {
 	out := make(map[string][]byte, len(ids))
@@ -130,81 +132,45 @@ func (s *PostImageStore) Bytes(ctx context.Context, db *sqlx.DB, ids []string) (
 	if len(missing) == 0 {
 		return out, nil
 	}
-	query, args, err := sqlx.In(`SELECT id, data FROM image_objects WHERE id IN (?)`, missing)
-	if err != nil {
+	if err := s.loadFromDB(ctx, db, missing, out); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// loadFromDB は ids の画像を DB から読んでファイルに置く。out が nil でなければ中身も入れる。
+func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []string, out map[string][]byte) error {
+	query, args, err := sqlx.In(`SELECT id, data FROM image_objects WHERE id IN (?)`, ids)
+	if err != nil {
+		return err
 	}
 	query = sqlx.Rebind(sqlx.DOLLAR, query)
 	rows, err := db.QueryxContext(ctx, query, append([]any{preparedQuery}, args...)...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id string
 		var data []byte
 		if err := rows.Scan(&id, &data); err != nil {
-			return nil, err
+			return err
 		}
 		if err := s.Save(id, data); err != nil {
-			return nil, err
+			return err
 		}
-		out[id] = data
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func contestAppIPs() []net.IP {
-	return []net.IP{
-		net.ParseIP("192.168.1.10"),
-		net.ParseIP("192.168.2.10"),
-		net.ParseIP("192.168.3.10"),
-	}
-}
-
-func localIPs() ([]net.IP, error) {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil, err
-	}
-	ips := make([]net.IP, 0, len(addrs))
-	for _, addr := range addrs {
-		ipnet, ok := addr.(*net.IPNet)
-		if !ok || ipnet.IP == nil {
-			continue
-		}
-		ips = append(ips, ipnet.IP)
-	}
-	return ips, nil
-}
-
-func ipInList(list []net.IP, raw string) bool {
-	ip := net.ParseIP(raw)
-	if ip == nil {
-		return false
-	}
-	for _, item := range list {
-		if item.Equal(ip) {
-			return true
+		if out != nil {
+			out[id] = data
 		}
 	}
-	return false
+	return rows.Err()
 }
 
-func runningOnContestApp() bool {
-	locals, err := localIPs()
-	if err != nil {
-		return false
-	}
-	for _, contest := range contestAppIPs() {
-		for _, local := range locals {
-			if local.Equal(contest) {
-				return true
-			}
+func fillPostImageCacheHandler(h *HandlerContext) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		if err := h.PostImages.FillMissing(c.Request().Context(), h.DB); err != nil {
+			return err
 		}
+		return c.NoContent(http.StatusNoContent)
 	}
-	return false
 }
