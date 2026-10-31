@@ -7,6 +7,9 @@
 #   make deploy   # ビルド → 各 APP_HOSTS へ rsync → systemctl restart（PG は触らない。チーム作業向き）
 #   make gogo     # 全 APP 停止 → スタンバイ/primary 停止 → ビルド → 配布 → ログ消去 → PG/APP/nginx 起動
 #                 # stop-the-world。チームのベンチと被せないこと。
+#   make replica/basebackup/europe1   # s2 へ pg_basebackup（s4 PG を止めないこと）
+#   make replica/basebackup/america1  # s3 へ pg_basebackup
+#   make replica/status               # primary / standby の追従確認
 #
 APPNAME := isureal-go.service
 APP_BIN := go/isureal
@@ -77,6 +80,16 @@ etc-sync/deploy/apply:
 etc-sync/diff:
 	./mybin/etc-sync/etc-sync.sh diff
 
+# 物理スタンバイの初期コピー。s4 の PostgreSQL を止めない（gogo と重ねない）。
+replica/basebackup/europe1:
+	./mybin/postgres/replica-basebackup.sh europe1
+
+replica/basebackup/america1:
+	./mybin/postgres/replica-basebackup.sh america1
+
+replica/status:
+	ssh $(DB_HOST) "sudo -u postgres psql -c \"SELECT application_name, client_addr, state, sync_state, replay_lag FROM pg_stat_replication ORDER BY 1;\" -c \"SELECT slot_name, active, restart_lsn FROM pg_replication_slots;\""
+	$(foreach h,$(STANDBY_DB_HOSTS),ssh $(h) "echo '--- $(h) ---'; sudo -u postgres psql -c \"SELECT pg_is_in_recovery(); SELECT status, slot_name, sender_host FROM pg_stat_wal_receiver;\" 2>&1 || echo 'pg down';")
 
 # 録画・再生で変更を20秒前後で確かめる (.agents/skills/isubench/SKILL.md)
 isubench/%:
