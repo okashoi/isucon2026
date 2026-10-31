@@ -52,7 +52,7 @@ make isubench/check           # 録画した通信を再生して正常版と比
 - 大半のルートに `SessionMiddleware` と `RegionMiddleware` が付く。ログイン中の利用者のリージョンがサーバの `ISUREAL_REGION` と違うと `403 region_mismatch` になる。全リクエストに `IPBanMiddleware` が付き、`ip_bans` を 200ms ごとに読み直す。
 - セッションは `SessionCache` にキャッシュする。各サーバが持つのは自リージョンの利用者の分だけで、セッションや所属リージョンを変更する処理は、commit のあと応答を返す前に `purgeUserSession` で所属リージョンのサーバの分を破棄する。
 - エラーは `NewAPIError` で返す。それ以外のエラーは `APIErrorHandler` が処理する。
-- `GET /api/notifications` は SSE で、接続を保持せず 500ms ごとに DB をポーリングする。
+- `GET /api/notifications` は SSE で、接続を保持せず 500ms ごとに DB をポーリングする。通知は `posting_windows` から導出し、`notifications` テーブルは読み書きしない。テーブルは `sql/003-initial-snapshot.sql` が参照するので残している。
 - 画像は `image_objects`（`created_at` によるパーティションが 36 個）に `bytea` で保存し、`GET /api/images/:imageId` が署名を検証して返す。
 
 ### DB アクセスの注意
