@@ -1,18 +1,39 @@
+# アプリ配布・再起動（issue #13）
+#
+# 前提: 競技ホスト上（または isucon-s* に ssh できるマシン）で実行する。
+# 配布先: APP_HOSTS（asia1/europe1/america1 = s1/s2/s3）。s4 は共有 PostgreSQL。
+# 配置先: REMOTE_APP_BIN（isureal-go.service の ExecStart と一致）
+#
+#   make deploy   # ビルド → 各 APP_HOSTS へ rsync → systemctl restart
+#   make gogo     # 全 APP 停止 → ビルド → 配布 → ログ消去 → PG/APP/nginx 起動
+#
 APPNAME := isureal-go.service
+APP_BIN := go/isureal
+REMOTE_APP_BIN := /home/isucon/webapp/go/isureal
+APP_HOSTS ?= isucon-s1 isucon-s2 isucon-s3
+DB_HOST := isucon-s4
 
 .PHONY: *
-gogo: stop-services build logs/clear start-services
+gogo: stop-services deploy/sync logs/clear start-services
 
 stop-services:
-	sudo systemctl stop nginx
-	sudo systemctl stop $(APPNAME)
-	# sudo systemctl stop postgresql
-	ssh isucon-s4 "sudo systemctl stop postgresql"
+	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo systemctl stop nginx $(APPNAME)";)
+	ssh $(DB_HOST) "sudo systemctl stop postgresql"
 
 build:
 	cd go && make
-	# cd go && make
-	# cd go && go build -o isuhoge
+
+# ビルドしてバイナリだけ配る（サービスは触らない）。gogo から呼ぶ。
+deploy/sync: build
+	$(foreach h,$(APP_HOSTS),rsync -az $(APP_BIN) $(h):$(REMOTE_APP_BIN);)
+
+# ビルド → 配布 → 再起動（nginx / PostgreSQL は触らない）
+# 実行中バイナリの ETXTBSY を避けるため .new 経由で差し替える。
+deploy: build
+	@for h in $(APP_HOSTS); do \
+		rsync -az $(APP_BIN) $$h:$(REMOTE_APP_BIN).new && \
+		ssh $$h "mv $(REMOTE_APP_BIN).new $(REMOTE_APP_BIN) && sudo systemctl restart $(APPNAME)"; \
+	done
 
 logs: limit=10000
 logs: opts=
@@ -23,19 +44,12 @@ logs/error:
 	$(MAKE) logs opts='--grep "(error|panic|- 500)" --no-pager'
 
 logs/clear:
-	sudo journalctl --rotate && sudo journalctl --vacuum-size=1K
-	sudo truncate --size 0 /var/log/nginx/access.log
-	sudo truncate --size 0 /var/log/nginx/error.log
-	# sudo truncate --size 0 /var/log/mysql/mysql-slow.log && sudo chmod 666 /var/log/mysql/mysql-slow.log
-	# sudo truncate --size 0 /var/log/mysql/error.log
-	ssh isucon-s4 "sudo -u postgres truncate -s 0 /var/log/postgresql/postgresql-16-main.log"
+	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo journalctl --rotate && sudo journalctl --vacuum-size=1K && sudo truncate --size 0 /var/log/nginx/access.log && sudo truncate --size 0 /var/log/nginx/error.log";)
+	ssh $(DB_HOST) "sudo -u postgres truncate -s 0 /var/log/postgresql/postgresql-16-main.log"
 
 start-services:
-	sudo systemctl daemon-reload
-	ssh isucon-s4 "sudo systemctl start postgresql"
-	# sudo systemctl start postgresql
-	sudo systemctl start $(APPNAME)
-	sudo systemctl start nginx
+	ssh $(DB_HOST) "sudo systemctl start postgresql"
+	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo systemctl daemon-reload && sudo systemctl start $(APPNAME) && sudo systemctl start nginx";)
 
 etc-sync/pull:
 	./mybin/etc-sync/etc-sync.sh pull
