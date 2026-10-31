@@ -46,7 +46,7 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
    SELECT u.secret_key_hash
    FROM image_objects i JOIN users u ON u.id = i.owner_user_id
    WHERE i.id = $1 AND u.status = 'active'
-  `, input.ImageID)
+  `, preparedQuery, input.ImageID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}
@@ -83,7 +83,7 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
        WHERE r.image_id = i.id AND r.reactor_id = u.id AND r.replaced_at IS NULL AND r.deleted_at IS NULL
      )
    )
-  `, input.ImageID)
+  `, preparedQuery, input.ImageID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}

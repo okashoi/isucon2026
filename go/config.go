@@ -4,7 +4,14 @@ import (
 	"net"
 	"net/url"
 	"os"
+
+	"github.com/jackc/pgx/v5"
 )
+
+// クエリの第1引数に渡すと、既定の simple protocol の代わりに prepared statement で実行する。
+// simple protocol では bytea が hex のテキストになって転送量が2倍になり、
+// パーティション数の多い image_objects を引くクエリは実行のたびにプランニングが走る。
+const preparedQuery = pgx.QueryExecModeCacheStatement
 
 type Config struct {
 	Region     string
@@ -30,10 +37,11 @@ func ConfigFromEnv() *Config {
 
 func (c *Config) DatabaseDSN() string {
 	u := url.URL{
-		Scheme: "postgres",
-		User:   url.UserPassword(c.DBUser, c.DBPassword),
-		Host:   net.JoinHostPort(c.DBHost, c.DBPort),
-		Path:   "/" + c.DBName,
+		Scheme:   "postgres",
+		User:     url.UserPassword(c.DBUser, c.DBPassword),
+		Host:     net.JoinHostPort(c.DBHost, c.DBPort),
+		Path:     "/" + c.DBName,
+		RawQuery: "default_query_exec_mode=simple_protocol",
 	}
 	return u.String()
 }

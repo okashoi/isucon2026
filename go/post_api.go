@@ -2,6 +2,7 @@ package isureal
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"image/jpeg"
@@ -86,6 +87,21 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
+		// 画像の書き込みはウィンドウ行をロックしない。投稿の確定だけ短いトランザクションで行う。
+		imageID := uuid.NewString()
+		imageCreatedAt := time.Now().UTC()
+		if _, err := h.DB.ExecContext(ctx, `INSERT INTO image_objects (id, owner_user_id, data, media_type, created_at) VALUES ($1, $2, $3, 'image/jpeg', $4)`, preparedQuery, imageID, userID, imageData, imageCreatedAt); err != nil {
+			return err
+		}
+		keepImage := false
+		defer func() {
+			if keepImage {
+				return
+			}
+			// INSERT と同じ binary 形式で created_at を渡す。text 形式だとナノ秒が丸められて一致しないことがある。
+			_, _ = h.DB.ExecContext(context.Background(), `DELETE FROM image_objects WHERE id = $1 AND created_at = $2`, preparedQuery, imageID, imageCreatedAt)
+		}()
+
 		tx, err := h.DB.BeginTxx(ctx, nil)
 		if err != nil {
 			return err
@@ -105,9 +121,6 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 			StartsAt  time.Time `db:"starts_at"`
 		}
 		err = tx.GetContext(ctx, &window, `SELECT id, local_date, starts_at FROM posting_windows WHERE region = $1 AND ended_at IS NULL FOR UPDATE`, user.Region)
-		if errors.Is(err, sql.ErrNoRows) {
-			err = tx.GetContext(ctx, &window, `SELECT id, local_date, starts_at FROM posting_windows WHERE region = $1 AND ended_at IS NULL FOR UPDATE`, user.Region)
-		}
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return NewAPIError(http.StatusConflict, "post_slot_unavailable")
@@ -130,10 +143,6 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if counts.Active != 0 || counts.Deleted >= 2 || postedAt.Before(window.StartsAt) {
 			return NewAPIError(http.StatusConflict, "post_slot_unavailable")
 		}
-		imageID := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects (id, owner_user_id, data, media_type, created_at) VALUES ($1, $2, $3, 'image/jpeg', $4)`, imageID, userID, imageData, postedAt); err != nil {
-			return err
-		}
 		postID := uuid.NewString()
 		if _, err := tx.ExecContext(ctx, `
    INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility,
@@ -150,6 +159,7 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		keepImage = true
 		return c.JSON(http.StatusCreated, newPostResponse(post, user))
 	}
 }
