@@ -13,6 +13,7 @@ import (
 )
 
 const imageURLLifetime = 24 * time.Hour
+const imageURLExpiryStep = 10 * time.Minute
 const imageSignatureIterations = 1000
 
 func imageSigningKey(secretKeyHash string) ([]byte, error) {
@@ -70,13 +71,13 @@ func computeImageSignature(key []byte, imageID string, exp int64) []byte {
 	return value
 }
 
-// imageSignatureExpiry は期限を分境界へ切り上げる。同じ分に発行した URL が同じ exp になり、署名を再利用できる。
+// imageSignatureExpiry は期限を imageURLExpiryStep の境界へ切り上げる。同じ区間に発行した URL が同じ exp になり、署名を再利用できる。
 // 切り上げなので、有効期限は 24 時間より短くならない。
 func imageSignatureExpiry(now time.Time) int64 {
 	deadline := now.Add(imageURLLifetime)
-	rounded := deadline.Truncate(time.Minute)
+	rounded := deadline.Truncate(imageURLExpiryStep)
 	if rounded.Before(deadline) {
-		rounded = rounded.Add(time.Minute)
+		rounded = rounded.Add(imageURLExpiryStep)
 	}
 	return rounded.Unix()
 }
