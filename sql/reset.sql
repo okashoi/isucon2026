@@ -224,4 +224,19 @@ BEGIN
 END;
 $$;
 
+-- users 行のロックの下で読んだ所属リージョンを返す。
+CREATE OR REPLACE FUNCTION logout_user(p_user_id text, p_token_hash text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  v_region text;
+BEGIN
+  SELECT region INTO STRICT v_region FROM users WHERE id = p_user_id FOR NO KEY UPDATE;
+
+  UPDATE login_sessions
+  SET active = false, invalidated_at = clock_timestamp(), reason = 'logout'
+  WHERE user_id = p_user_id AND active = true AND token_hash = p_token_hash;
+
+  RETURN v_region;
+END;
+$$;
+
 COMMIT;
