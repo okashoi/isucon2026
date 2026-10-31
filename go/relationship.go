@@ -52,6 +52,19 @@ func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string)
 	return tx, nil
 }
 
+type createFriendRequestResult struct {
+	Result     string     `db:"result"`
+	RelationID *string    `db:"relation_id"`
+	Status     *string    `db:"relation_status"`
+	UpdatedAt  *time.Time `db:"relation_updated_at"`
+}
+
+func createFriendRequest(ctx context.Context, db sqlx.QueryerContext, actor, target string) (createFriendRequestResult, error) {
+	var result createFriendRequestResult
+	err := sqlx.GetContext(ctx, db, &result, `SELECT result, relation_id, relation_status, relation_updated_at FROM create_friend_request($1, $2, $3::bigint)`, actor, target, userPairAdvisoryKey(actor, target))
+	return result, err
+}
+
 func isBlocked(ctx context.Context, db sqlx.QueryerContext, actor, target string) (bool, error) {
 	var blocked bool
 	err := sqlx.GetContext(ctx, db, &blocked, `SELECT EXISTS(SELECT 1 FROM block_relations WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1))`, actor, target)
