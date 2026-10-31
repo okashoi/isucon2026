@@ -18,16 +18,24 @@ type execerContext interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// リージョン在籍（登録・リージョン変更・退会・投稿期間の開始）を直列化する。
-// 投稿やコメントは在籍を変えないので、このロックは取らない。
+// 投稿期間の開始は排他。退会・移籍は共有。入れ替え中の移籍が古い local_date に載ると post_slot_unavailable になるので、
+// 期間開始と在籍変更だけはぶつける。在籍変更どうしは互いに並走してよい。
 // pg_advisory_xact_lock(int, int) は bigint 版とロック空間が別なので、ペアロックと衝突しない。
 func lockRegionMemberships(ctx context.Context, db execerContext, regions ...string) error {
+	return lockRegionMembershipsMode(ctx, db, `SELECT pg_advisory_xact_lock($1::integer, $2::integer)`, regions...)
+}
+
+func lockRegionMembershipsShared(ctx context.Context, db execerContext, regions ...string) error {
+	return lockRegionMembershipsMode(ctx, db, `SELECT pg_advisory_xact_lock_shared($1::integer, $2::integer)`, regions...)
+}
+
+func lockRegionMembershipsMode(ctx context.Context, db execerContext, query string, regions ...string) error {
 	keys, err := regionAdvisoryKeys(regions)
 	if err != nil {
 		return err
 	}
 	for _, key := range keys {
-		if _, err := db.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1::integer, $2::integer)`, int32(1), key); err != nil {
+		if _, err := db.ExecContext(ctx, query, int32(1), key); err != nil {
 			return err
 		}
 	}
@@ -81,6 +89,7 @@ func lockUserPair(ctx context.Context, tx *sqlx.Tx, a, b string) (bool, error) {
 	return len(ids) == 2, err
 }
 
+// userPairAdvisoryKey を変えるときは sql/reset.sql の user_pair_advisory_key も同じ値になるように変える。
 func userPairAdvisoryKey(a, b string) int64 {
 	if a > b {
 		a, b = b, a

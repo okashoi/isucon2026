@@ -64,6 +64,20 @@ type PostWithAuthor struct {
 	Author User `db:"author"`
 }
 
+// createPost は投稿枠が空いていなければ sql.ErrNoRows を返す。Author の ImageKey は設定しない。
+// 画像の行も同じ文で書く。バイト列は imageOrigin のリージョンのサーバのローカルにある。
+func createPost(ctx context.Context, db sqlx.QueryerContext, authorID, imageID, imageOrigin, caption, visibility string, location PostLocation) (PostWithAuthor, error) {
+	var post PostWithAuthor
+	err := sqlx.GetContext(ctx, db, &post, `
+  SELECT `+postColumns+`, `+userColumnsAs("u", "author")+`
+  FROM create_post($1, $2, $3, $4, $5, $6, $7, $8, $9) c
+  CROSS JOIN LATERAL (SELECT (c.new_post).*) p
+  CROSS JOIN LATERAL (SELECT (c.post_window).*) w
+  CROSS JOIN LATERAL (SELECT (c.author).*) u
+ `, authorID, imageID, imageOrigin, caption, visibility, location.Kind, location.Latitude, location.Longitude, location.Locality)
+	return post, err
+}
+
 func selectPostsWithAuthor(ctx context.Context, db sqlx.QueryerContext, conditions string, args ...any) ([]PostWithAuthor, error) {
 	var posts []PostWithAuthor
 	if err := sqlx.SelectContext(ctx, db, &posts, `

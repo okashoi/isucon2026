@@ -1,9 +1,7 @@
 package isureal
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"net/http"
 
@@ -82,30 +80,11 @@ func registerHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_registration")
 		}
 		secretKey := uuid.NewString()
-		hash := sha256.Sum256([]byte(secretKey))
-		ctx := c.Request().Context()
-		tx, err := h.DB.BeginTxx(ctx, nil)
+		user, err := registerUser(c.Request().Context(), h.DB, input.Username, secretKey, input.DisplayName, input.Region)
+		if isUniqueViolation(err) {
+			return NewAPIError(http.StatusConflict, "username_taken")
+		}
 		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		// 同じリージョンの在籍変更と投稿期間開始を直列化する。ユーザー名の一意性は UNIQUE 制約が持つ。
-		if err := lockRegionMemberships(ctx, tx, input.Region); err != nil {
-			return err
-		}
-		userID := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO users (id, username, secret_key_hash, display_name, region, username_norm, display_name_norm) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			userID, input.Username, hex.EncodeToString(hash[:]), input.DisplayName, input.Region, normalizeSearchText(input.Username), normalizeSearchText(input.DisplayName)); err != nil {
-			if isUniqueViolation(err) {
-				return NewAPIError(http.StatusConflict, "username_taken")
-			}
-			return err
-		}
-		user, err := getUser(ctx, tx, userID)
-		if err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
 			return err
 		}
 		return c.JSON(http.StatusCreated, registerResponse{SecretKey: secretKey, User: newSessionUserResponse(user)})
@@ -123,28 +102,11 @@ func loginHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
 		}
 		ctx := c.Request().Context()
-		tx, err := h.DB.BeginTxx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		var user User
-		err = tx.GetContext(ctx, &user, `SELECT id, username, secret_key_hash, display_name, bio, profile_image_id, region, account_type, status FROM users WHERE username = $1 FOR NO KEY UPDATE`, input.Username)
+		user, token, err := loginUser(ctx, h.DB, input.Username, input.SecretKey)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
 		}
 		if err != nil {
-			return err
-		}
-		hash := sha256.Sum256([]byte(input.SecretKey))
-		if user.Status != "active" || user.SecretKeyHash != hex.EncodeToString(hash[:]) {
-			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
-		}
-		token, err := replaceLoginSession(ctx, tx, user.ID)
-		if err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
 			return err
 		}
 		if err := purgeUserSession(ctx, h, user.Region, user.ID); err != nil {
@@ -219,7 +181,7 @@ func updateMeHandler(h *HandlerContext) echo.HandlerFunc {
 				return err
 			}
 			if currentRegion != *input.Region {
-				if err := lockRegionMemberships(ctx, tx, currentRegion, *input.Region); err != nil {
+				if err := lockRegionMembershipsShared(ctx, tx, currentRegion, *input.Region); err != nil {
 					return err
 				}
 			}

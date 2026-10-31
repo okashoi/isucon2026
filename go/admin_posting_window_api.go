@@ -43,7 +43,7 @@ func openPostingWindowHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		// 同じリージョンの開始どうしを直列化し、競合を posting_window_conflict で返す。
+		// 排他で開始どうしと在籍変更を直列化し、競合を posting_window_conflict で返す。
 		if err := lockRegionMemberships(ctx, tx, region); err != nil {
 			return err
 		}
