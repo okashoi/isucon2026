@@ -16,12 +16,15 @@ import (
 // 画像の取得とエクスポートは、バイト列をリクエストのたびに DB から運ばない。
 // 画像は ID ごとに中身が変わらないので、取得の可否だけを DB で確認すればよい。
 type PostImageStore struct {
-	// make post-images/sync が配る初期データの画像。初期化では消さない。
+	// 初期データの画像。make post-images/sync が配り、DB から読んだものも置く。初期化では消さない。
 	dir string
-	// 実行中に書き込んだ画像と、DB から読んだ画像。初期化で消す。
+	// 実行中に作られた画像。初期化で消す。
 	runtimeDir string
 	mu         sync.Mutex
 }
+
+// imageInitialColumn は初期化で消えない行を示す列。reset.sql の削除条件の逆。
+const imageInitialColumn = `created_at <= (SELECT created_at FROM initial_data_boundary) AS initial`
 
 func NewPostImageStore() (*PostImageStore, error) {
 	dir := os.Getenv("ISUREAL_POST_IMAGE_DIR")
@@ -81,6 +84,17 @@ func (s *PostImageStore) Save(id string, data []byte) error {
 	return save(s.runtimeDir, id, data)
 }
 
+// saveLoaded は DB から読んだ画像を置く。初期データの画像は次のベンチでも同じ ID で読まれるので、初期化で消さない。
+func (s *PostImageStore) saveLoaded(id string, data []byte, initial bool) error {
+	dir := s.runtimeDir
+	if initial {
+		dir = s.dir
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return save(dir, id, data)
+}
+
 func save(dir, id string, data []byte) error {
 	path, err := imageFilePath(dir, id)
 	if err != nil {
@@ -113,12 +127,16 @@ func (s *PostImageStore) Load(ctx context.Context, db sqlx.QueryerContext, id st
 	if !errors.Is(err, os.ErrNotExist) && validImageFileID(id) {
 		return nil, err
 	}
-	if err := sqlx.GetContext(ctx, db, &data, `SELECT data FROM image_objects WHERE id = $1`, preparedQuery, id); err != nil {
+	var image struct {
+		Data    []byte `db:"data"`
+		Initial bool   `db:"initial"`
+	}
+	if err := sqlx.GetContext(ctx, db, &image, `SELECT data, `+imageInitialColumn+` FROM image_objects WHERE id = $1`, preparedQuery, id); err != nil {
 		return nil, err
 	}
 	// 置けなくても次の取得で DB から読み直す。
-	_ = s.Save(id, data)
-	return data, nil
+	_ = s.saveLoaded(id, image.Data, image.Initial)
+	return image.Data, nil
 }
 
 // FillMissing は初期データの画像のうち、ファイルが無いものだけを DB から書き出す。
@@ -143,7 +161,7 @@ func (s *PostImageStore) FillMissing(ctx context.Context, db *sqlx.DB) error {
 	}
 	for len(missing) > 0 {
 		n := min(len(missing), fillBatchSize)
-		if err := s.loadFromDB(ctx, db, missing[:n], s.dir, nil); err != nil {
+		if err := s.loadFromDB(ctx, db, missing[:n], nil); err != nil {
 			return err
 		}
 		missing = missing[n:]
@@ -175,15 +193,15 @@ func (s *PostImageStore) Bytes(ctx context.Context, db *sqlx.DB, ids []string) (
 	if len(missing) == 0 {
 		return out, nil
 	}
-	if err := s.loadFromDB(ctx, db, missing, s.runtimeDir, out); err != nil {
+	if err := s.loadFromDB(ctx, db, missing, out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// loadFromDB は ids の画像を DB から読んで dir に置く。out が nil でなければ中身も入れる。
-func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []string, dir string, out map[string][]byte) error {
-	query, args, err := sqlx.In(`SELECT id, data FROM image_objects WHERE id IN (?)`, ids)
+// loadFromDB は ids の画像を DB から読んで置く。out が nil でなければ中身も入れる。
+func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []string, out map[string][]byte) error {
+	query, args, err := sqlx.In(`SELECT id, data, `+imageInitialColumn+` FROM image_objects WHERE id IN (?)`, ids)
 	if err != nil {
 		return err
 	}
@@ -196,13 +214,11 @@ func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []stri
 	for rows.Next() {
 		var id string
 		var data []byte
-		if err := rows.Scan(&id, &data); err != nil {
+		var initial bool
+		if err := rows.Scan(&id, &data, &initial); err != nil {
 			return err
 		}
-		s.mu.Lock()
-		err := save(dir, id, data)
-		s.mu.Unlock()
-		if err != nil {
+		if err := s.saveLoaded(id, data, initial); err != nil {
 			return err
 		}
 		if out != nil {
