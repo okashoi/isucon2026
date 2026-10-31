@@ -34,17 +34,35 @@ func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string)
 	if err != nil {
 		return nil, err
 	}
-	for _, id := range []string{min(actor, target), max(actor, target)} {
-		var lockedID string
-		if err := tx.GetContext(ctx, &lockedID, `SELECT id FROM users WHERE id=$1 AND status='active' FOR NO KEY UPDATE`, id); err != nil {
-			tx.Rollback()
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil, NewAPIError(http.StatusNotFound, "relationship_not_found")
-			}
-			return nil, err
-		}
+	if err := lockUserPair(ctx, tx, actor, target); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	// 行ロックは行為者だけ。相手は在籍確認に留め、人気ユーザーの行を掴み続けない。
+	if err := requireActiveUser(ctx, tx, actor, true); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	if err := requireActiveUser(ctx, tx, target, false); err != nil {
+		tx.Rollback()
+		return nil, err
 	}
 	return tx, nil
+}
+
+func requireActiveUser(ctx context.Context, tx *sqlx.Tx, userID string, lockRow bool) error {
+	query := `SELECT id FROM users WHERE id=$1 AND status='active'`
+	if lockRow {
+		query += ` FOR NO KEY UPDATE`
+	}
+	var lockedID string
+	if err := tx.GetContext(ctx, &lockedID, query, userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return NewAPIError(http.StatusNotFound, "relationship_not_found")
+		}
+		return err
+	}
+	return nil
 }
 
 func isBlocked(ctx context.Context, db sqlx.QueryerContext, actor, target string) (bool, error) {
