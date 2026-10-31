@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jmoiron/sqlx"
 )
 
 // execerContext はトランザクション中のロック取得に使う。
@@ -64,13 +65,20 @@ func regionAdvisoryKeys(regions []string) ([]int32, error) {
 	return keys, nil
 }
 
-// lockUserPair は同じ二人の関係操作・コメント・RealMoji を直列化する。
-// 相手の users 行はロックしない。
-func lockUserPair(ctx context.Context, db execerContext, a, b string) error {
-	if _, err := db.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1::bigint)`, userPairAdvisoryKey(a, b)); err != nil {
-		return err
-	}
-	return nil
+// lockUserPair は同じ二人の関係操作・コメント・RealMoji を直列化し、二人の users 行を FOR KEY SHARE でロックする。
+// FOR KEY SHARE は退会の FOR UPDATE とだけ衝突し、ログインや投稿の FOR NO KEY UPDATE とは衝突しない。
+// 二人とも active なら true を返す。
+// この文のスナップショットは advisory lock を待つ前に決まるので、関係の確認は後続の文で行う。
+func lockUserPair(ctx context.Context, tx *sqlx.Tx, a, b string) (bool, error) {
+	var ids []string
+	err := tx.SelectContext(ctx, &ids, `
+  WITH pair AS MATERIALIZED (SELECT 1 FROM pg_advisory_xact_lock($1::bigint))
+  SELECT u.id FROM pair, users u
+  WHERE u.id IN ($2, $3) AND u.status = 'active'
+  ORDER BY u.id
+  FOR KEY SHARE OF u
+ `, userPairAdvisoryKey(a, b), a, b)
+	return len(ids) == 2, err
 }
 
 func userPairAdvisoryKey(a, b string) int64 {

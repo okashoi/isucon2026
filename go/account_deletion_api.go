@@ -21,7 +21,8 @@ func deleteAccountHandler(h *HandlerContext) echo.HandlerFunc {
 			ID     string `db:"id"`
 			Region string `db:"region"`
 		}
-		err = tx.GetContext(ctx, &locked, `SELECT id, region FROM users WHERE id=$1 AND status='active' FOR NO KEY UPDATE`, userID)
+		// lockUserPair の FOR KEY SHARE と衝突させるため FOR UPDATE にする。
+		err = tx.GetContext(ctx, &locked, `SELECT id, region FROM users WHERE id=$1 AND status='active' FOR UPDATE`, userID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusNotFound, "account_not_found")
 		}

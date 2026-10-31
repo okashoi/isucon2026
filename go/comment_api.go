@@ -50,7 +50,7 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		defer tx.Rollback()
 		if actor != post.AuthorID {
-			if err := lockUserPair(ctx, tx, actor, post.AuthorID); err != nil {
+			if _, err := lockUserPair(ctx, tx, actor, post.AuthorID); err != nil {
 				return err
 			}
 		}
