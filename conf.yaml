@@ -11,7 +11,7 @@ includes:
   - /etc/sysctl.d
   - /etc/security/limits.conf
   - /etc/hosts
-  # nginx (sites-enabled は通常ファイルとして中身を git 管理。sites-available も同内容を保持)
+  # nginx (sites-enabled は symlink。実体は sites-available)
   - /etc/nginx/nginx.conf
   - /etc/nginx/sites-enabled
   - /etc/nginx/sites-available
