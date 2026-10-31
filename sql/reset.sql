@@ -233,10 +233,13 @@ END;
 $$;
 
 -- users 行のロックの下で読んだ所属リージョンを返す。
+-- standby の反映を待たずに commit する。login_sessions は standby から読まないので、無効化は primary の commit で効く。
+-- 明示トランザクションの中では呼ばない。
 CREATE OR REPLACE FUNCTION logout_user(p_user_id text, p_token_hash text) RETURNS text LANGUAGE plpgsql AS $$
 DECLARE
   v_region text;
 BEGIN
+  PERFORM set_config('synchronous_commit', 'local', true);
   SELECT region INTO STRICT v_region FROM users WHERE id = p_user_id FOR NO KEY UPDATE;
 
   UPDATE login_sessions
