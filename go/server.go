@@ -18,6 +18,7 @@ type HandlerContext struct {
 	ReadDB     *sqlx.DB // 読み取り。ISUREAL_DB_READ_HOST 未設定時は DB と同じ
 	Config     *Config
 	IPBans     *IPBanList
+	Abuse      *AbuseDetector
 	Sessions   *SessionCache
 	PostImages *PostImageStore
 }
@@ -62,10 +63,12 @@ func NewServer(config *Config) *echo.Echo {
 		ReadDB:     readDB,
 		Config:     config,
 		IPBans:     &IPBanList{},
+		Abuse:      NewAbuseDetector(),
 		Sessions:   NewSessionCache(),
 		PostImages: postImages,
 	}
 	e.Use(IPBanMiddleware(handlerContext))
+	e.Use(AbuseBanMiddleware(handlerContext))
 
 	// 他のアプリサーバが :8080 へ直接送る。nginx は /api/ だけを転送するので、ルーターの公開先からは届かない。
 	e.DELETE("/internal/session-cache", purgeAllSessionsHandler(handlerContext))
