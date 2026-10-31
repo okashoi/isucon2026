@@ -42,6 +42,17 @@ func writeNotificationEvent(c *echo.Context, userID string, event postingWindowE
 	return http.NewResponseController(response).Flush()
 }
 
+func notificationUserActive(ctx context.Context, h *HandlerContext, userID, region string) (bool, error) {
+	row := struct {
+		Region string `db:"region"`
+		Status string `db:"status"`
+	}{}
+	if err := h.ReadDB.GetContext(ctx, &row, `SELECT region, status FROM users WHERE id = $1`, userID); err != nil {
+		return false, err
+	}
+	return row.Status == "active" && row.Region == region, nil
+}
+
 func hubWindowAfterConnect(hub *PostingWindowHub, region string, connectedAt time.Time) (postingWindowEvent, bool) {
 	cur, ok := hub.Current(region)
 	if !ok || !cur.StartsAt.After(connectedAt) {
@@ -50,7 +61,7 @@ func hubWindowAfterConnect(hub *PostingWindowHub, region string, connectedAt tim
 	return cur, true
 }
 
-func loadOpenWindowAfter(ctx context.Context, h *HandlerContext, region string, connectedAt time.Time) (postingWindowEvent, error) {
+func loadOpenWindowAfter(ctx context.Context, h *HandlerContext, userID, region string, connectedAt time.Time) (postingWindowEvent, error) {
 	if cur, ok := hubWindowAfterConnect(h.Windows, region, connectedAt); ok {
 		return cur, nil
 	}
@@ -59,10 +70,11 @@ func loadOpenWindowAfter(ctx context.Context, h *HandlerContext, region string, 
   SELECT w.id, w.region, w.starts_at,
          to_char(w.local_date, 'YYYY-MM-DD') AS local_date,
          w.on_time_deadline
-  FROM posting_windows w
-  WHERE w.region = $1 AND w.ended_at IS NULL AND w.starts_at > $2
+  FROM users u
+  JOIN posting_windows w ON w.region = u.region AND w.ended_at IS NULL AND w.starts_at > $2
+  WHERE u.id = $1 AND u.status = 'active'
   LIMIT 1
- `, region, connectedAt)
+ `, userID, connectedAt)
 	if err != nil {
 		return postingWindowEvent{}, err
 	}
@@ -75,8 +87,11 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 		ctx := c.Request().Context()
 		session := GetSession(c)
 		userID := session.UserID
-		// SessionMiddleware が active 利用者を既に確認している。接続中の退会は稀なので DB を叩かない。
-		connectedAt := time.Now()
+		// starts_at と比較するので、接続時刻は DB 時計に揃える。
+		var connectedAt time.Time
+		if err := h.ReadDB.GetContext(ctx, &connectedAt, `SELECT clock_timestamp()`); err != nil {
+			return err
+		}
 
 		response := c.Response()
 		response.Header().Set("Content-Type", "text/event-stream")
@@ -91,8 +106,18 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 		wait := h.Windows.Subscribe(session.Region)
 		defer h.Windows.Unsubscribe(session.Region, wait)
 
-		existing, err := loadOpenWindowAfter(ctx, h, session.Region, connectedAt)
+		existing, err := loadOpenWindowAfter(ctx, h, userID, session.Region, connectedAt)
 		if err == nil {
+			okActive, activeErr := notificationUserActive(ctx, h, userID, session.Region)
+			if activeErr != nil {
+				if !errors.Is(activeErr, sql.ErrNoRows) && ctx.Err() == nil {
+					c.Logger().Error("failed to get notification user", "error", activeErr)
+				}
+				return nil
+			}
+			if !okActive {
+				return nil
+			}
 			if writeErr := writeNotificationEvent(c, userID, existing); writeErr != nil {
 				return nil
 			}
@@ -103,6 +128,8 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 			return nil
 		}
 
+		statusTick := time.NewTicker(5 * time.Second)
+		defer statusTick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
@@ -114,10 +141,31 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 				if !event.StartsAt.After(connectedAt) || event.Region != session.Region {
 					continue
 				}
+				okActive, activeErr := notificationUserActive(ctx, h, userID, session.Region)
+				if activeErr != nil {
+					if !errors.Is(activeErr, sql.ErrNoRows) && ctx.Err() == nil {
+						c.Logger().Error("failed to get notification user", "error", activeErr)
+					}
+					return nil
+				}
+				if !okActive {
+					return nil
+				}
 				if writeErr := writeNotificationEvent(c, userID, event); writeErr != nil {
 					return nil
 				}
 				return nil
+			case <-statusTick.C:
+				okActive, activeErr := notificationUserActive(ctx, h, userID, session.Region)
+				if activeErr != nil {
+					if !errors.Is(activeErr, sql.ErrNoRows) && ctx.Err() == nil {
+						c.Logger().Error("failed to get notification user", "error", activeErr)
+					}
+					return nil
+				}
+				if !okActive {
+					return nil
+				}
 			}
 		}
 	}
