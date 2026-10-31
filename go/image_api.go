@@ -48,7 +48,7 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 			MediaType     string `db:"media_type"`
 			Visible       bool   `db:"visible"`
 		}
-		err = h.DB.GetContext(ctx, &object, `
+		err = h.ReadDB.GetContext(ctx, &object, `
    SELECT u.secret_key_hash, i.media_type, (
      COALESCE(u.profile_image_id = i.id, false)
      OR EXISTS (
@@ -84,7 +84,7 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 
 		// 署名を確かめてから読むので、不正な署名ではバイト列を DB から運ばない。
-		data, err := h.PostImages.Load(ctx, h.DB, input.ImageID)
+		data, err := h.PostImages.Load(ctx, h.ReadDB, input.ImageID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}

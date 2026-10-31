@@ -10,15 +10,30 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// アプリサーバ3台の合計が PostgreSQL の max_connections = 100 に収まるようにする。
+// アプリ3台の primary 向け合計が s4 の max_connections（300）に収まるようにする。
 const maxDBConns = 100
 
 type HandlerContext struct {
-	DB         *sqlx.DB
+	DB         *sqlx.DB // primary（書き込み・TX・initialize）
+	ReadDB     *sqlx.DB // 読み取り。ISUREAL_DB_READ_HOST 未設定時は DB と同じ
 	Config     *Config
 	IPBans     *IPBanList
 	Sessions   *SessionCache
 	PostImages *PostImageStore
+}
+
+func openDB(dsn string) *sqlx.DB {
+	db, err := sqlx.Open("pgx", dsn)
+	if err != nil {
+		panic("failed to open database: " + err.Error())
+	}
+	db.SetMaxOpenConns(maxDBConns)
+	// 接続の確立は WAN 越しの往復を要するため、確立済みの接続を閉じずに使い回す。
+	db.SetMaxIdleConns(maxDBConns)
+	if err := db.Ping(); err != nil {
+		panic("failed to ping database: " + err.Error())
+	}
+	return db
 }
 
 func NewServer(config *Config) *echo.Echo {
@@ -32,16 +47,10 @@ func NewServer(config *Config) *echo.Echo {
 	e.Use(middleware.Recover())
 	e.HTTPErrorHandler = APIErrorHandler
 
-	db, err := sqlx.Open("pgx", config.DatabaseDSN())
-	if err != nil {
-		panic("failed to open database: " + err.Error())
-	}
-	db.SetMaxOpenConns(maxDBConns)
-	// 接続の確立は WAN 越しの往復を要するため、確立済みの接続を閉じずに使い回す。
-	db.SetMaxIdleConns(maxDBConns)
-	err = db.Ping()
-	if err != nil {
-		panic("failed to ping database: " + err.Error())
+	db := openDB(config.DatabaseDSN())
+	readDB := db
+	if config.DBReadHost != "" {
+		readDB = openDB(config.DatabaseReadDSN())
 	}
 
 	postImages, err := NewPostImageStore()
@@ -50,6 +59,7 @@ func NewServer(config *Config) *echo.Echo {
 	}
 	handlerContext := &HandlerContext{
 		DB:         db,
+		ReadDB:     readDB,
 		Config:     config,
 		IPBans:     &IPBanList{},
 		Sessions:   NewSessionCache(),

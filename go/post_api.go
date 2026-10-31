@@ -189,7 +189,7 @@ func getMyCurrentPostHandler(h *HandlerContext) echo.HandlerFunc {
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
 		var postID string
-		err := h.DB.GetContext(ctx, &postID, `
+		err := h.ReadDB.GetContext(ctx, &postID, `
    SELECT p.id FROM posts p
    JOIN posting_windows w ON w.id = p.posting_window_id
    JOIN users u ON u.id = p.author_id
@@ -203,14 +203,14 @@ func getMyCurrentPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		post, err := getPost(ctx, h.DB, postID)
+		post, err := getPost(ctx, h.ReadDB, postID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusNotFound, "post_not_found")
 		}
 		if err != nil {
 			return err
 		}
-		user, err := getUser(ctx, h.DB, userID)
+		user, err := getUser(ctx, h.ReadDB, userID)
 		if err != nil {
 			return err
 		}
@@ -231,14 +231,14 @@ func getPostHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		ctx := c.Request().Context()
-		post, err := getPostWithAuthor(ctx, h.DB, input.PostID)
+		post, err := getPostWithAuthor(ctx, h.ReadDB, input.PostID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusNotFound, "post_not_found")
 		}
 		if err != nil {
 			return err
 		}
-		viewer, err := loadViewerContext(ctx, h.DB, GetSession(c).UserID)
+		viewer, err := loadViewerContext(ctx, h.ReadDB, GetSession(c).UserID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}

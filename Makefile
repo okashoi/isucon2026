@@ -1,23 +1,26 @@
 # アプリ配布・再起動（issue #13）
 #
 # 前提: 競技ホスト上（または isucon-s* に ssh できるマシン）で実行する。
-# 配布先: APP_HOSTS（asia1/europe1/america1 = s1/s2/s3）。s4 は共有 PostgreSQL。
-# 配置先: REMOTE_APP_BIN（isureal-go.service の ExecStart と一致）
+# 配布先: APP_HOSTS（asia1/europe1/america1 = s1/s2/s3）。s4 は共有 PostgreSQL primary。
+# s2/s3 は同期スタンバイ。配置先: REMOTE_APP_BIN（isureal-go.service の ExecStart と一致）
 #
-#   make deploy   # ビルド → 各 APP_HOSTS へ rsync → systemctl restart
-#   make gogo     # 全 APP 停止 → ビルド → 配布 → ログ消去 → PG/APP/nginx 起動
+#   make deploy   # ビルド → 各 APP_HOSTS へ rsync → systemctl restart（PG は触らない。チーム作業向き）
+#   make gogo     # 全 APP 停止 → スタンバイ/primary 停止 → ビルド → 配布 → ログ消去 → PG/APP/nginx 起動
+#                 # stop-the-world。チームのベンチと被せないこと。
 #
 APPNAME := isureal-go.service
 APP_BIN := go/isureal
 REMOTE_APP_BIN := /home/isucon/webapp/go/isureal
 APP_HOSTS ?= isucon-s1 isucon-s2 isucon-s3
 DB_HOST := isucon-s4
+STANDBY_DB_HOSTS ?= isucon-s2 isucon-s3
 
 .PHONY: *
 gogo: stop-services deploy/sync logs/clear start-services
 
 stop-services:
 	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo systemctl stop nginx $(APPNAME)";)
+	$(foreach h,$(STANDBY_DB_HOSTS),ssh $(h) "sudo systemctl stop postgresql";)
 	ssh $(DB_HOST) "sudo systemctl stop postgresql"
 
 build:
@@ -55,9 +58,11 @@ logs/error:
 logs/clear:
 	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo journalctl --rotate && sudo journalctl --vacuum-size=1K && sudo truncate --size 0 /var/log/nginx/access.log && sudo truncate --size 0 /var/log/nginx/error.log";)
 	ssh $(DB_HOST) "sudo -u postgres truncate -s 0 /var/log/postgresql/postgresql-16-main.log"
+	$(foreach h,$(STANDBY_DB_HOSTS),ssh $(h) "sudo -u postgres truncate -s 0 /var/log/postgresql/postgresql-16-main.log";)
 
 start-services:
 	ssh $(DB_HOST) "sudo systemctl start postgresql"
+	$(foreach h,$(STANDBY_DB_HOSTS),ssh $(h) "sudo systemctl start postgresql";)
 	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo systemctl daemon-reload && sudo systemctl start $(APPNAME) && sudo systemctl start nginx";)
 
 etc-sync/pull:
