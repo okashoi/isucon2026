@@ -1,6 +1,7 @@
 package isureal
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"io"
@@ -44,6 +45,26 @@ type createPostResponse struct {
 	LateSeconds     int64              `json:"lateSeconds"`
 }
 
+func currentWindowEvent(ctx context.Context, h *HandlerContext, region string) (postingWindowEvent, error) {
+	if ev, ok := h.Windows.Current(region); ok && ev.ID != "" {
+		return ev, nil
+	}
+	var window PostingWindow
+	err := h.ReadDB.GetContext(ctx, &window, `
+  SELECT id, region, local_date, starts_at, on_time_deadline, ended_at
+  FROM posting_windows WHERE region = $1 AND ended_at IS NULL
+ `, region)
+	if err != nil {
+		return postingWindowEvent{}, err
+	}
+	ev := postingWindowEvent{
+		ID: window.ID, Region: window.Region, StartsAt: window.StartsAt,
+		LocalDate: window.LocalDate.Format(time.DateOnly), OnTimeDeadline: window.OnTimeDeadline,
+	}
+	h.Windows.SetCurrent(ev)
+	return ev, nil
+}
+
 func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		var input createPostRequest
@@ -81,8 +102,20 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
-		// 画像のバイト列は DB に書かず、このサーバのローカルにだけ置く。ファイルの書き込みはウィンドウ行をロックしない。
-		// 他のサーバはコミット後に画像の行を見てここへ取りに来るので、コミットより先に置く。
+		window, err := currentWindowEvent(ctx, h, GetSession(c).Region)
+		if errors.Is(err, sql.ErrNoRows) {
+			return NewAPIError(http.StatusConflict, "post_slot_unavailable")
+		}
+		if err != nil {
+			return err
+		}
+		author, err := getUser(ctx, h.ReadDB, userID)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+
+		// 画像のバイト列は DB に書かず、このサーバのローカルにだけ置く。
 		imageID := uuid.NewString()
 		if err := h.PostImages.SaveOrigin(imageID, imageData); err != nil {
 			return err
@@ -94,22 +127,24 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 			}
 		}()
 
-		post, err := createPost(ctx, h.DB, userID, imageID, h.Config.Region, input.Caption, input.Visibility, location)
-		if errors.Is(err, sql.ErrNoRows) {
+		post := PostWithAuthor{
+			Post: Post{
+				ID: uuid.NewString(), AuthorID: userID, PostingWindowID: window.ID,
+				ImageID: imageID, Caption: input.Caption, Visibility: input.Visibility,
+				PostLocation: location, PostedAt: now, OnTimeDeadline: window.OnTimeDeadline,
+			},
+			Author: author,
+		}
+		if !h.Active.TryCreate(post, window.LocalDate, now, window.StartsAt) {
 			return NewAPIError(http.StatusConflict, "post_slot_unavailable")
 		}
-		// ほかの失敗は確定したかどうか分からないので、ここからは画像を消さない。
+		if err := fanoutActivePost(ctx, h, post); err != nil {
+			h.Active.Remove(post.ID)
+			return err
+		}
 		keepImage = true
-		if err != nil {
-			return err
-		}
+		h.Persist.Enqueue(post, h.Config.Region)
 		h.PostImages.ReplicateToPeers(ctx, imageID, imageData)
-		if err := post.Author.setImageKey(); err != nil {
-			return err
-		}
-		if err := publishActivePost(ctx, h, post); err != nil {
-			return err
-		}
 		return c.JSON(http.StatusCreated, newPostResponse(post.Post, post.Author))
 	}
 }
@@ -138,6 +173,9 @@ func getMyCurrentPostHandler(h *HandlerContext) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
+		if post, ok := h.Active.CurrentByAuthor(userID); ok {
+			return c.JSON(http.StatusOK, getMyCurrentPostResponse(newPostResponse(post.Post, post.Author)))
+		}
 		var postID string
 		err := h.ReadDB.GetContext(ctx, &postID, `
    SELECT p.id FROM posts p
@@ -181,7 +219,7 @@ func getPostHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		ctx := c.Request().Context()
-		post, err := getPostWithAuthor(ctx, h.ReadDB, input.PostID)
+		post, err := resolvePostWithAuthor(h, ctx, h.ReadDB, input.PostID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusNotFound, "post_not_found")
 		}
@@ -233,6 +271,34 @@ func updatePostHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
+		if cached, ok := h.Active.Get(input.PostID); ok {
+			if cached.AuthorID != userID {
+				return NewAPIError(http.StatusForbidden, "post_not_editable")
+			}
+			if input.Caption != nil {
+				cached.Caption = *input.Caption
+			}
+			if input.Visibility != nil {
+				cached.Visibility = *input.Visibility
+			}
+			if err := publishActivePost(ctx, h, cached); err != nil {
+				return err
+			}
+			if err := h.Persist.Ensure(ctx, cached.ID); err != nil {
+				return err
+			}
+			if input.Caption != nil {
+				if _, err := h.DB.ExecContext(ctx, `UPDATE posts SET caption = $2 WHERE id = $1`, cached.ID, *input.Caption); err != nil {
+					return err
+				}
+			}
+			if input.Visibility != nil {
+				if _, err := h.DB.ExecContext(ctx, `UPDATE posts SET visibility = $2 WHERE id = $1`, cached.ID, *input.Visibility); err != nil {
+					return err
+				}
+			}
+			return c.JSON(http.StatusOK, updatePostResponse(newPostResponse(cached.Post, cached.Author)))
+		}
 		tx, err := beginLocalTx(ctx, h.DB)
 		if err != nil {
 			return err
@@ -301,6 +367,32 @@ func deletePostHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
+		if cached, ok := h.Active.Get(input.PostID); ok {
+			if cached.AuthorID != userID {
+				return NewAPIError(http.StatusForbidden, "post_not_editable")
+			}
+			localDate := ""
+			if ev, ok := h.Windows.Current(cached.Author.Region); ok && ev.ID == cached.PostingWindowID {
+				localDate = ev.LocalDate
+			}
+			if localDate == "" {
+				window, err := getPostingWindow(ctx, h.DB, cached.PostingWindowID)
+				if err != nil {
+					return err
+				}
+				localDate = window.LocalDate.Format(time.DateOnly)
+			}
+			if !h.Active.TryRecordDelete(userID, localDate) {
+				return NewAPIError(http.StatusConflict, "post_slot_unavailable")
+			}
+			h.Persist.MarkDeleted(cached.ID)
+			if err := withdrawActivePost(ctx, h, cached.ID); err != nil {
+				return err
+			}
+			_ = h.Persist.Ensure(ctx, cached.ID)
+			_, _ = h.DB.ExecContext(ctx, `UPDATE posts SET deleted_at = clock_timestamp() WHERE id = $1 AND deleted_at IS NULL`, cached.ID)
+			return c.NoContent(http.StatusNoContent)
+		}
 		tx, err := beginLocalTx(ctx, h.DB)
 		if err != nil {
 			return err
@@ -340,6 +432,7 @@ func deletePostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		h.Active.RecordDelete(userID, window.LocalDate.Format(time.DateOnly))
 		if err := withdrawActivePost(ctx, h, post.ID); err != nil {
 			return err
 		}

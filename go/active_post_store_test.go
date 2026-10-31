@@ -118,6 +118,32 @@ func TestActivePostStoreReplaceKeepsOnePost(t *testing.T) {
 	}
 }
 
+func TestActivePostStoreTryCreateSlotAndGet(t *testing.T) {
+	store := NewActivePostStore()
+	starts := time.Unix(10, 0).UTC()
+	post := samplePost("a1", "ann", "asia", "w-asia", "friends", starts.Add(time.Second))
+	if !store.TryCreate(post, "2026-10-31", starts.Add(time.Second), starts) {
+		t.Fatal("first create should succeed")
+	}
+	if _, ok := store.Get("a1"); !ok {
+		t.Fatal("created post missing")
+	}
+	dup := samplePost("a2", "ann", "asia", "w-asia", "friends", starts.Add(2*time.Second))
+	if store.TryCreate(dup, "2026-10-31", starts.Add(2*time.Second), starts) {
+		t.Fatal("second active post must be rejected")
+	}
+	store.Remove("a1")
+	if !store.TryRecordDelete("ann", "2026-10-31") || !store.TryRecordDelete("ann", "2026-10-31") {
+		t.Fatal("two deletes should be allowed")
+	}
+	if store.TryRecordDelete("ann", "2026-10-31") {
+		t.Fatal("third delete must be rejected")
+	}
+	if store.TryCreate(dup, "2026-10-31", starts.Add(3*time.Second), starts) {
+		t.Fatal("create after two deletes must be rejected")
+	}
+}
+
 func TestActivePostWireKeepsSigningMaterial(t *testing.T) {
 	imageID := "profile-1"
 	post := samplePost("a1", "ann", "asia", "w-asia", "public", time.Unix(10, 0).UTC())

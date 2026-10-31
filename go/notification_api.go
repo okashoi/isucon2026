@@ -76,13 +76,16 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 		// 購読開始前に始まった窓を取りこぼさない。
 		var existing postingWindowEvent
 		err := h.ReadDB.GetContext(ctx, &existing, `
-   SELECT w.id, w.region, w.starts_at
+   SELECT w.id, w.region, w.starts_at,
+          to_char(w.local_date, 'YYYY-MM-DD') AS local_date,
+          w.on_time_deadline
    FROM users u
    JOIN posting_windows w ON w.region = u.region AND w.ended_at IS NULL AND w.starts_at > $2
    WHERE u.id = $1 AND u.status = 'active'
    LIMIT 1
   `, userID, connectedAt)
 		if err == nil {
+			h.Windows.SetCurrent(existing)
 			if writeErr := writeNotificationEvent(c, userID, existing); writeErr != nil {
 				return nil
 			}

@@ -12,19 +12,25 @@ import (
 )
 
 type postingWindowEvent struct {
-	ID       string    `json:"id" db:"id"`
-	Region   string    `json:"region" db:"region"`
-	StartsAt time.Time `json:"startsAt" db:"starts_at"`
+	ID             string    `json:"id" db:"id"`
+	Region         string    `json:"region" db:"region"`
+	StartsAt       time.Time `json:"startsAt" db:"starts_at"`
+	LocalDate      string    `json:"localDate,omitempty" db:"local_date"`
+	OnTimeDeadline time.Time `json:"onTimeDeadline" db:"on_time_deadline"`
 }
 
-// PostingWindowHub は投稿期間開始を同リージョンの SSE 待ちへ届ける。
+// PostingWindowHub は投稿期間開始を同リージョンの SSE 待ちへ届け、直近の窓をメモリに持つ。
 type PostingWindowHub struct {
 	mu      sync.Mutex
 	waiters map[string]map[chan postingWindowEvent]struct{}
+	current map[string]postingWindowEvent
 }
 
 func NewPostingWindowHub() *PostingWindowHub {
-	return &PostingWindowHub{waiters: map[string]map[chan postingWindowEvent]struct{}{}}
+	return &PostingWindowHub{
+		waiters: map[string]map[chan postingWindowEvent]struct{}{},
+		current: map[string]postingWindowEvent{},
+	}
 }
 
 func (h *PostingWindowHub) Clear() {
@@ -36,6 +42,7 @@ func (h *PostingWindowHub) Clear() {
 		}
 		delete(h.waiters, region)
 	}
+	h.current = map[string]postingWindowEvent{}
 }
 
 func (h *PostingWindowHub) Subscribe(region string) chan postingWindowEvent {
@@ -65,9 +72,23 @@ func (h *PostingWindowHub) Unsubscribe(region string, ch chan postingWindowEvent
 	}
 }
 
+func (h *PostingWindowHub) Current(region string) (postingWindowEvent, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ev, ok := h.current[region]
+	return ev, ok
+}
+
+func (h *PostingWindowHub) SetCurrent(event postingWindowEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.current[event.Region] = event
+}
+
 func (h *PostingWindowHub) Publish(event postingWindowEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.current[event.Region] = event
 	for ch := range h.waiters[event.Region] {
 		select {
 		case ch <- event:

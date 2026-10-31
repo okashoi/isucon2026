@@ -60,7 +60,7 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		post, err := getPost(ctx, h.DB, input.PostID)
+		post, err := resolvePost(h, ctx, h.DB, input.PostID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
@@ -70,12 +70,15 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		if actor == post.AuthorID {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
+		if err := h.Persist.Ensure(ctx, post.ID); err != nil {
+			return err
+		}
 		tx, err := beginRelationshipTx(ctx, h.DB, actor, post.AuthorID)
 		if err != nil {
 			return err
 		}
 		defer tx.Rollback()
-		allowed, err := canViewPost(ctx, tx, h.Graph, actor, post.ID)
+		allowed, err := canViewPost(ctx, tx, h.Graph, h.Active, actor, post.ID)
 		if err != nil {
 			return err
 		}
@@ -141,7 +144,7 @@ func getRealMojisHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_pagination")
 		}
 		ctx := c.Request().Context()
-		allowed, err := canViewPost(ctx, h.ReadDB, h.Graph, GetSession(c).UserID, input.PostID)
+		allowed, err := canViewPost(ctx, h.ReadDB, h.Graph, h.Active, GetSession(c).UserID, input.PostID)
 		if err != nil {
 			return err
 		}

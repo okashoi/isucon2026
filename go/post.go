@@ -107,6 +107,24 @@ func getPostWithAuthor(ctx context.Context, db sqlx.QueryerContext, postID strin
 	return posts[0], nil
 }
 
+func resolvePost(h *HandlerContext, ctx context.Context, db sqlx.QueryerContext, postID string) (Post, error) {
+	if h != nil && h.Active != nil {
+		if post, ok := h.Active.Get(postID); ok {
+			return post.Post, nil
+		}
+	}
+	return getPost(ctx, db, postID)
+}
+
+func resolvePostWithAuthor(h *HandlerContext, ctx context.Context, db sqlx.QueryerContext, postID string) (PostWithAuthor, error) {
+	if h != nil && h.Active != nil {
+		if post, ok := h.Active.Get(postID); ok {
+			return post, nil
+		}
+	}
+	return getPostWithAuthor(ctx, db, postID)
+}
+
 type viewerContext struct {
 	User
 	HasPostedToday         bool
@@ -295,15 +313,24 @@ func (viewer viewerContext) canView(post Post) bool {
 	}
 }
 
-func canViewPost(ctx context.Context, db sqlx.QueryerContext, cache *GraphCache, viewerID, postID string) (bool, error) {
-	post, err := getPostWithAuthor(ctx, db, postID)
+func canViewPost(ctx context.Context, db sqlx.QueryerContext, cache *GraphCache, active *ActivePostStore, viewerID, postID string) (bool, error) {
+	var post PostWithAuthor
+	var err error
+	if active != nil {
+		var ok bool
+		if post, ok = active.Get(postID); !ok {
+			post, err = getPostWithAuthor(ctx, db, postID)
+		}
+	} else {
+		post, err = getPostWithAuthor(ctx, db, postID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	viewer, err := loadViewerContext(ctx, db, cache, viewerID, nil)
+	viewer, err := loadViewerContext(ctx, db, cache, viewerID, active)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

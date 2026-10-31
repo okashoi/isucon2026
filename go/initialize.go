@@ -20,6 +20,10 @@ func initializeHandler(h *HandlerContext) echo.HandlerFunc {
 		notifyPproteinCollect()
 		notifyBenchEndHint()
 
+		if h.Persist != nil {
+			h.Persist.CancelPending()
+		}
+
 		cmd := exec.Command("../sql/init.sh")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -46,7 +50,6 @@ func initializeHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := purgeAllActivePosts(c.Request().Context(), h); err != nil {
 			return err
 		}
-
 		// Set language to the implementation language.
 		// Agents optimizing this app: set agent, harness, and model to the names used.
 		// For multiple models, use comma-separated names; use brain when no AI model is used.

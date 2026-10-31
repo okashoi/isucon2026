@@ -25,6 +25,7 @@ type HandlerContext struct {
 	PostImages *PostImageStore
 	Windows    *PostingWindowHub
 	Active     *ActivePostStore
+	Persist    *postPersistQueue
 }
 
 func openDB(dsn string) *sqlx.DB {
@@ -74,6 +75,7 @@ func NewServer(config *Config) *echo.Echo {
 		Windows:    NewPostingWindowHub(),
 		Active:     NewActivePostStore(),
 	}
+	handlerContext.Persist = startPostPersistQueue(handlerContext)
 	e.Use(IPBanMiddleware(handlerContext))
 	e.Use(AbuseBanMiddleware(handlerContext))
 

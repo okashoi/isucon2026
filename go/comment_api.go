@@ -37,11 +37,14 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		post, err := getPost(ctx, h.DB, input.PostID)
+		post, err := resolvePost(h, ctx, h.DB, input.PostID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
 		if err != nil {
+			return err
+		}
+		if err := h.Persist.Ensure(ctx, post.ID); err != nil {
 			return err
 		}
 		tx, err := beginLocalTx(ctx, h.DB)
@@ -53,7 +56,7 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 		if _, err := lockUserPair(ctx, tx, actor, post.AuthorID); err != nil {
 			return err
 		}
-		allowed, err := canComment(ctx, tx, h.Graph, actor, post.ID)
+		allowed, err := canComment(ctx, tx, h.Graph, h.Active, actor, post.ID)
 		if err != nil {
 			return err
 		}
@@ -100,7 +103,7 @@ func getCommentsHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_pagination")
 		}
 		ctx := c.Request().Context()
-		allowed, err := canComment(ctx, h.ReadDB, h.Graph, GetSession(c).UserID, input.PostID)
+		allowed, err := canComment(ctx, h.ReadDB, h.Graph, h.Active, GetSession(c).UserID, input.PostID)
 		if err != nil {
 			return err
 		}

@@ -24,6 +24,8 @@ type ActivePostStore struct {
 	byID     map[string]PostWithAuthor
 	byAuthor map[string]map[string]struct{}
 	byRegion map[string]map[string]struct{}
+	// authorID/localDate -> 当日の削除回数（create_post と同じ上限 2）
+	deletes map[string]int
 }
 
 func NewActivePostStore() *ActivePostStore {
@@ -31,7 +33,12 @@ func NewActivePostStore() *ActivePostStore {
 		byID:     map[string]PostWithAuthor{},
 		byAuthor: map[string]map[string]struct{}{},
 		byRegion: map[string]map[string]struct{}{},
+		deletes:  map[string]int{},
 	}
+}
+
+func deleteSlotKey(authorID, localDate string) string {
+	return authorID + "/" + localDate
 }
 
 func (s *ActivePostStore) Live() bool {
@@ -72,7 +79,71 @@ func (s *ActivePostStore) Clear() {
 	s.byID = map[string]PostWithAuthor{}
 	s.byAuthor = map[string]map[string]struct{}{}
 	s.byRegion = map[string]map[string]struct{}{}
+	s.deletes = map[string]int{}
 	s.live = false
+}
+
+func (s *ActivePostStore) Get(postID string) (PostWithAuthor, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	post, ok := s.byID[postID]
+	return post, ok
+}
+
+func (s *ActivePostStore) CurrentByAuthor(authorID string) (PostWithAuthor, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for postID := range s.byAuthor[authorID] {
+		return s.byID[postID], true
+	}
+	return PostWithAuthor{}, false
+}
+
+func (s *ActivePostStore) DeletedCount(authorID, localDate string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.deletes[deleteSlotKey(authorID, localDate)]
+}
+
+func (s *ActivePostStore) RecordDelete(authorID, localDate string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := deleteSlotKey(authorID, localDate)
+	s.deletes[key]++
+	return s.deletes[key]
+}
+
+// TryRecordDelete は削除上限未満のときだけ数え、上限なら false。
+func (s *ActivePostStore) TryRecordDelete(authorID, localDate string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := deleteSlotKey(authorID, localDate)
+	if s.deletes[key] >= 2 {
+		return false
+	}
+	s.deletes[key]++
+	return true
+}
+
+// TryCreate は枠条件を満たすときだけ投稿を載せる。create_post と同じ判定をロック下で行う。
+func (s *ActivePostStore) TryCreate(post PostWithAuthor, localDate string, now, windowStartsAt time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.byAuthor[post.AuthorID]) > 0 {
+		return false
+	}
+	if s.deletes[deleteSlotKey(post.AuthorID, localDate)] >= 2 {
+		return false
+	}
+	if now.Before(windowStartsAt) {
+		return false
+	}
+	if old, ok := s.byID[post.ID]; ok {
+		s.unlinkLocked(old)
+	}
+	s.linkLocked(post)
+	s.live = true
+	return true
 }
 
 // DropOtherWindows は region の投稿のうち、開いている windowID 以外を消す。
@@ -212,6 +283,10 @@ func (w activePostWire) decode() (PostWithAuthor, error) {
 
 func publishActivePost(ctx context.Context, h *HandlerContext, post PostWithAuthor) error {
 	h.Active.Add(post)
+	return fanoutActivePost(ctx, h, post)
+}
+
+func fanoutActivePost(ctx context.Context, h *HandlerContext, post PostWithAuthor) error {
 	body, err := json.Marshal(newActivePostWire(post))
 	if err != nil {
 		return err
