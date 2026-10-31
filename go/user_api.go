@@ -181,7 +181,7 @@ func updateMeHandler(h *HandlerContext) echo.HandlerFunc {
 				return err
 			}
 			if currentRegion != *input.Region {
-				if err := lockRegionMemberships(ctx, tx, currentRegion, *input.Region); err != nil {
+				if err := lockRegionMembershipsShared(ctx, tx, currentRegion, *input.Region); err != nil {
 					return err
 				}
 			}
