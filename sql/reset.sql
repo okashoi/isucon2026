@@ -204,4 +204,24 @@ BEGIN
 END;
 $$;
 
+-- 認証に失敗したら行を返さない。有効なセッションが複数残らないよう、users 行のロックの下で置き換える。
+CREATE OR REPLACE FUNCTION login_user(p_username text, p_secret_key_hash text, p_token_hash text)
+RETURNS SETOF users LANGUAGE plpgsql AS $$
+DECLARE
+  v_user users;
+BEGIN
+  SELECT * INTO v_user FROM users WHERE username = p_username FOR NO KEY UPDATE;
+  IF NOT FOUND OR v_user.status <> 'active' OR v_user.secret_key_hash <> p_secret_key_hash THEN
+    RETURN;
+  END IF;
+
+  UPDATE login_sessions
+  SET active = false, invalidated_at = clock_timestamp(), reason = 'replaced'
+  WHERE user_id = v_user.id AND active = true;
+  INSERT INTO login_sessions (id, user_id, token_hash) VALUES (gen_random_uuid(), v_user.id, p_token_hash);
+
+  RETURN NEXT v_user;
+END;
+$$;
+
 COMMIT;
