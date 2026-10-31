@@ -50,7 +50,7 @@ func getSessionFromHeader(c *echo.Context, h *HandlerContext) (*Session, error) 
 	}
 	generation := h.Sessions.Generation()
 	var session Session
-	// login_user は standby の反映を待たずに commit するので、standby では置き換え前のセッションが有効に見えることがある。
+	// login_user と logout_user は standby の反映を待たずに commit するので、standby では無効化前のセッションが有効に見えることがある。
 	err := h.DB.GetContext(c.Request().Context(), &session, `
 		SELECT s.user_id, s.token_hash, s.created_at, u.region
 		FROM login_sessions s JOIN users u ON u.id = s.user_id
