@@ -55,6 +55,25 @@ CREATE INDEX IF NOT EXISTS friendships_user_high_id ON friendships(user_high_id)
 CREATE INDEX IF NOT EXISTS users_region_status ON users(region, status);
 CREATE INDEX IF NOT EXISTS users_status_username_id ON users(status, username, id);
 CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users (username);
+-- pg_trgm は trusted extension。contrib が無い環境では検索結果は同じで、3 文字以上の検索だけ索引を使わない。
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS pg_trgm;
+EXCEPTION
+  WHEN insufficient_privilege OR undefined_file THEN
+    RAISE WARNING 'pg_trgm is unavailable: %', SQLERRM;
+END $$;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') THEN
+    CREATE INDEX IF NOT EXISTS users_active_username_norm_trgm
+      ON users USING gin (username_norm gin_trgm_ops)
+      WHERE status = 'active';
+    CREATE INDEX IF NOT EXISTS users_active_display_name_norm_trgm
+      ON users USING gin (display_name_norm gin_trgm_ops)
+      WHERE status = 'active';
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS friend_requests_pending_pair ON friend_requests(requester_id, recipient_id) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS friend_requests_pending_recipient ON friend_requests(recipient_id, requester_id) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS login_sessions_token_hash ON login_sessions(token_hash) WHERE active;

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v5"
 	"golang.org/x/text/cases"
@@ -27,6 +28,38 @@ func normalizeSearchText(value string) string {
 	return norm.NFC.String(cases.Fold().String(norm.NFC.String(value)))
 }
 
+// likeContainsPattern は strings.Contains と同じ部分一致を LIKE で表す。
+// % と _ と \ はリテラルとして探す。前後の % だけがワイルドカード。
+func likeContainsPattern(value string) string {
+	var b strings.Builder
+	b.Grow(len(value) + 2)
+	b.WriteByte('%')
+	for _, r := range value {
+		if r == '\\' || r == '%' || r == '_' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('%')
+	return b.String()
+}
+
+// 3 文字未満は pg_trgm がトライグラムを作れず、username 順のインデックスを 51 件で止める方が軽い。
+// 3 文字以上は LIKE にして gin_trgm_ops を使う。simple protocol なのでパターンはリテラルになる。
+func searchUsersSQL(trigram bool) string {
+	match := `(strpos(u.username_norm, $2) > 0 OR strpos(u.display_name_norm, $2) > 0)`
+	if trigram {
+		match = `(u.username_norm LIKE $2 OR u.display_name_norm LIKE $2)`
+	}
+	return `SELECT ` + strings.Join(userColumns, ", ") + ` FROM users u
+		WHERE u.status = 'active' AND u.id <> $1
+		  AND ` + match + `
+		  AND NOT EXISTS (SELECT 1 FROM block_relations b WHERE (b.blocker_id = $1 AND b.blocked_id = u.id) OR (b.blocker_id = u.id AND b.blocked_id = $1))
+		  AND (u.username, u.id) > ($3, $4)
+		ORDER BY u.username, u.id
+		LIMIT 51`
+}
+
 func searchUsersHandler(h *HandlerContext) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		var input searchUsersRequest
@@ -42,13 +75,13 @@ func searchUsersHandler(h *HandlerContext) echo.HandlerFunc {
 		ctx := c.Request().Context()
 		viewer := GetSession(c).UserID
 		query := normalizeSearchText(input.Q)
+		statement, pattern := searchUsersSQL(false), query
+		if utf8.RuneCountInString(query) >= 3 {
+			statement, pattern = searchUsersSQL(true), likeContainsPattern(query)
+		}
 		var users []User
-		if err := h.ReadDB.SelectContext(ctx, &users, `SELECT `+strings.Join(userColumns, ", ")+` FROM users u
-			WHERE status='active' AND id<>$1
-			  AND (strpos(username_norm, $2) > 0 OR strpos(display_name_norm, $2) > 0)
-			  AND NOT EXISTS (SELECT 1 FROM block_relations b WHERE (b.blocker_id=$1 AND b.blocked_id=u.id) OR (b.blocker_id=u.id AND b.blocked_id=$1))
-			  AND ($3='' OR (username,id)>($3,$4))
-			ORDER BY username, id LIMIT 51`, viewer, query, input.BeforeUsername, input.BeforeID); err != nil {
+		// カーソルが空のときは ('', '') より大きい全行が対象になる。username は 1 文字以上。
+		if err := h.ReadDB.SelectContext(ctx, &users, statement, viewer, pattern, input.BeforeUsername, input.BeforeID); err != nil {
 			return err
 		}
 		items := make([]relationshipUserResponse, 0, len(users))
