@@ -288,28 +288,4 @@ BEGIN
 END;
 $$;
 
--- p_region_key は Go の regionAdvisoryKey の値で、lockRegionMemberships と同じロックを取る。
--- ユーザー名の重複は users_username の一意性違反としてそのまま呼び出し元に返す。
-CREATE OR REPLACE FUNCTION register_user(
-  p_region_key integer,
-  p_username text,
-  p_secret_key_hash text,
-  p_display_name text,
-  p_region text,
-  p_username_norm text,
-  p_display_name_norm text
-) RETURNS users LANGUAGE plpgsql AS $$
-DECLARE
-  v_user users;
-BEGIN
-  PERFORM pg_advisory_xact_lock(1, p_region_key);
-
-  INSERT INTO users (id, username, secret_key_hash, display_name, region, username_norm, display_name_norm)
-  VALUES (gen_random_uuid(), p_username, p_secret_key_hash, p_display_name, p_region, p_username_norm, p_display_name_norm)
-  RETURNING * INTO v_user;
-
-  RETURN v_user;
-END;
-$$;
-
 COMMIT;

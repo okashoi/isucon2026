@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -68,16 +69,12 @@ func getUser(ctx context.Context, db sqlx.QueryerContext, userID string) (User, 
 	return user, user.setImageKey()
 }
 
-// registerUser は同じリージョンの在籍変更と投稿期間開始を直列化する。ユーザー名の一意性は UNIQUE 制約が持つ。
+// registerUser のユーザー名の一意性は UNIQUE 制約が持つ。
 func registerUser(ctx context.Context, db sqlx.QueryerContext, username, secretKey, displayName, region string) (User, error) {
-	regionKey, ok := regionAdvisoryKey(region)
-	if !ok {
-		return User{}, fmt.Errorf("unknown region %q", region)
-	}
 	secretKeyHash := sha256.Sum256([]byte(secretKey))
 	var user User
-	err := sqlx.GetContext(ctx, db, &user, `SELECT `+userColumnList+` FROM register_user($1, $2, $3, $4, $5, $6, $7)`,
-		regionKey, username, hex.EncodeToString(secretKeyHash[:]), displayName, region, normalizeSearchText(username), normalizeSearchText(displayName))
+	err := sqlx.GetContext(ctx, db, &user, `INSERT INTO users (id, username, secret_key_hash, display_name, region, username_norm, display_name_norm) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING `+userColumnList,
+		uuid.NewString(), username, hex.EncodeToString(secretKeyHash[:]), displayName, region, normalizeSearchText(username), normalizeSearchText(displayName))
 	return user, err
 }
 
