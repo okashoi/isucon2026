@@ -16,8 +16,8 @@ const peerRequestTimeout = 5 * time.Second
 var peerClient = &http.Client{Timeout: peerRequestTimeout}
 
 // SessionCache は token_hash からログインセッションを引く。
-// 持つのはサーバのリージョンに所属する利用者のセッションだけなので、
-// 破棄が必要になるのは利用者が所属するリージョンの 1 台に限られる。
+// 持つのはサーバのリージョンに所属する利用者のセッションだけ。
+// asia のように同一リージョンに複数台あるときは、PeerURLs の全台へ破棄を送る。
 type SessionCache struct {
 	mu                sync.RWMutex
 	generation        uint64
@@ -76,17 +76,30 @@ func (c *SessionCache) PurgeAll() {
 func purgeUserSession(ctx context.Context, h *HandlerContext, region, userID string) error {
 	if region == h.Config.Region {
 		h.Sessions.PurgeUser(userID)
-		return nil
 	}
-	return requestPeerPurge(ctx, h.Config.PeerURLs[region]+"/internal/session-cache/"+url.PathEscape(userID))
+	path := "/internal/session-cache/" + url.PathEscape(userID)
+	for _, peerURL := range h.Config.PeerURLs[region] {
+		if err := requestPeerPurge(ctx, peerURL+path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func purgeAllSessions(ctx context.Context, h *HandlerContext) error {
 	h.Sessions.PurgeAll()
-	for region, peerURL := range h.Config.PeerURLs {
+	for region, peerURLs := range h.Config.PeerURLs {
 		if region == h.Config.Region {
 			continue
 		}
+		for _, peerURL := range peerURLs {
+			if err := requestPeerPurge(ctx, peerURL+"/internal/session-cache"); err != nil {
+				return err
+			}
+		}
+	}
+	// 同一リージョンの他台（asia の s4 など）も消す。
+	for _, peerURL := range h.Config.PeerURLs[h.Config.Region] {
 		if err := requestPeerPurge(ctx, peerURL+"/internal/session-cache"); err != nil {
 			return err
 		}

@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -23,8 +24,9 @@ type Config struct {
 	DBPassword string
 	DBName     string
 	LogLevel   string
-	// リージョンごとのアプリサーバ。この宛先への通信はルーターを経由する。
-	PeerURLs map[string]string
+	// リージョンごとのアプリサーバ。カンマ区切りで複数可。通信はルーター経由。
+	// asia は s1 と s4 の二台を想定する。
+	PeerURLs map[string][]string
 }
 
 func ConfigFromEnv() *Config {
@@ -37,10 +39,10 @@ func ConfigFromEnv() *Config {
 		DBPassword: envOrDefault("ISUREAL_DB_PASSWORD", "isureal"),
 		DBName:     envOrDefault("ISUREAL_DB_NAME", "isureal"),
 		LogLevel:   envOrDefault("ISUREAL_LOG_LEVEL", "debug"),
-		PeerURLs: map[string]string{
-			"asia":    envOrDefault("ISUREAL_PEER_URL_ASIA", "http://192.168.1.10:8080"),
-			"europe":  envOrDefault("ISUREAL_PEER_URL_EUROPE", "http://192.168.2.10:8080"),
-			"america": envOrDefault("ISUREAL_PEER_URL_AMERICA", "http://192.168.3.10:8080"),
+		PeerURLs: map[string][]string{
+			"asia":    splitPeerURLs(envOrDefault("ISUREAL_PEER_URL_ASIA", "http://192.168.1.10:8080,http://192.168.4.10:8080")),
+			"europe":  splitPeerURLs(envOrDefault("ISUREAL_PEER_URL_EUROPE", "http://192.168.2.10:8080")),
+			"america": splitPeerURLs(envOrDefault("ISUREAL_PEER_URL_AMERICA", "http://192.168.3.10:8080")),
 		},
 	}
 }
@@ -73,4 +75,16 @@ func envOrDefault(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func splitPeerURLs(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, strings.TrimRight(p, "/"))
+		}
+	}
+	return out
 }
