@@ -3,7 +3,9 @@ package isureal
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -100,60 +102,74 @@ type viewerContext struct {
 	Blocked          map[string]bool
 }
 
+// loadViewerContext は europe と america からは WAN 越しになるので、1 往復で取る。
+// friends_of_friends は友達の友達ごとの共通の友達の数で、友達がいれば本人も含む。
 func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID string) (viewerContext, error) {
-	viewer := viewerContext{Friends: map[string]bool{}, FriendsOfFriends: map[string]bool{}, MutualFriends: map[string]int{}}
-	var err error
-	if viewer.User, err = getUser(ctx, db, viewerID); err != nil {
-		return viewer, err
+	viewer := viewerContext{Friends: map[string]bool{}, FriendsOfFriends: map[string]bool{}, MutualFriends: map[string]int{}, Blocked: map[string]bool{}}
+	var row struct {
+		User
+		HasPostedToday   bool   `db:"has_posted_today"`
+		BlockedIDs       []byte `db:"blocked_ids"`
+		FriendIDs        []byte `db:"friend_ids"`
+		FriendsOfFriends []byte `db:"friends_of_friends"`
 	}
-	if err := sqlx.GetContext(ctx, db, &viewer.HasPostedToday, `
-  SELECT EXISTS(
-    SELECT 1 FROM posts p
-    JOIN posting_windows posted ON posted.id = p.posting_window_id
-    JOIN posting_windows current ON current.region = $2 AND current.ended_at IS NULL
-                                AND current.local_date = posted.local_date
-    WHERE p.author_id = $1 AND p.deleted_at IS NULL
+	if err := sqlx.GetContext(ctx, db, &row, `
+  WITH viewer AS (
+    SELECT `+strings.Join(userColumns, ", ")+` FROM users WHERE id = $1 AND status = 'active'
+  ), friends AS (
+    SELECT user_high_id AS id FROM friendships WHERE user_low_id = $1
+    UNION ALL
+    SELECT user_low_id FROM friendships WHERE user_high_id = $1
+  ), friend_edges AS (
+    SELECT s.user_high_id AS id FROM friends f JOIN friendships s ON s.user_low_id = f.id
+    UNION ALL
+    SELECT s.user_low_id FROM friends f JOIN friendships s ON s.user_high_id = f.id
+  ), friends_of_friends AS (
+    SELECT id, count(*) AS mutual_friends FROM friend_edges GROUP BY id
   )
- `, viewer.ID, viewer.Region); err != nil {
+  SELECT viewer.*,
+    EXISTS(
+      SELECT 1 FROM posts p
+      JOIN posting_windows posted ON posted.id = p.posting_window_id
+      JOIN posting_windows current ON current.region = viewer.region AND current.ended_at IS NULL
+                                  AND current.local_date = posted.local_date
+      WHERE p.author_id = viewer.id AND p.deleted_at IS NULL
+    ) AS has_posted_today,
+    (SELECT coalesce(json_agg(CASE WHEN blocker_id = $1 THEN blocked_id ELSE blocker_id END), '[]')
+     FROM block_relations WHERE blocker_id = $1 OR blocked_id = $1) AS blocked_ids,
+    (SELECT coalesce(json_agg(id), '[]') FROM friends) AS friend_ids,
+    (SELECT coalesce(json_object_agg(id, mutual_friends), '{}') FROM friends_of_friends) AS friends_of_friends
+  FROM viewer
+ `, viewerID); err != nil {
 		return viewer, err
 	}
-	if viewer.Blocked, err = getBlockedUserIDs(ctx, db, viewer.ID); err != nil {
+	viewer.User = row.User
+	viewer.HasPostedToday = row.HasPostedToday
+	var blockedIDs, friendIDs []string
+	var friendsOfFriends map[string]int
+	if err := json.Unmarshal(row.BlockedIDs, &blockedIDs); err != nil {
 		return viewer, err
 	}
-	friends, err := getFriendIDs(ctx, db, viewer.ID)
-	if err != nil {
+	if err := json.Unmarshal(row.FriendIDs, &friendIDs); err != nil {
 		return viewer, err
 	}
-	if len(friends) == 0 {
-		return viewer, nil
+	if err := json.Unmarshal(row.FriendsOfFriends, &friendsOfFriends); err != nil {
+		return viewer, err
 	}
-	for _, id := range friends {
+	for _, id := range blockedIDs {
+		viewer.Blocked[id] = true
+	}
+	for _, id := range friendIDs {
 		viewer.Friends[id] = true
 	}
-	query, args, err := sqlx.In(`SELECT user_low_id, user_high_id FROM friendships WHERE user_low_id IN (?) OR user_high_id IN (?)`, friends, friends)
-	if err != nil {
-		return viewer, err
-	}
-	var friendships []struct {
-		UserLowID  string `db:"user_low_id"`
-		UserHighID string `db:"user_high_id"`
-	}
-	if err := sqlx.SelectContext(ctx, db, &friendships, sqlx.Rebind(sqlx.DOLLAR, query), args...); err != nil {
-		return viewer, err
-	}
-	for _, friendship := range friendships {
-		if viewer.Friends[friendship.UserLowID] {
-			viewer.FriendsOfFriends[friendship.UserHighID] = true
-			if friendship.UserHighID != viewer.ID {
-				viewer.MutualFriends[friendship.UserHighID]++
-			}
+	for id, mutualFriends := range friendsOfFriends {
+		viewer.FriendsOfFriends[id] = true
+		if id != viewer.ID {
+			viewer.MutualFriends[id] = mutualFriends
 		}
-		if viewer.Friends[friendship.UserHighID] {
-			viewer.FriendsOfFriends[friendship.UserLowID] = true
-			if friendship.UserLowID != viewer.ID {
-				viewer.MutualFriends[friendship.UserLowID]++
-			}
-		}
+	}
+	if err := viewer.setImageKey(); err != nil {
+		return viewer, err
 	}
 	return viewer, nil
 }
