@@ -15,7 +15,7 @@ type initializeResponse struct {
 	Model    string `json:"model"`
 }
 
-func initializeHandler(*HandlerContext) echo.HandlerFunc {
+func initializeHandler(h *HandlerContext) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		notifyPproteinCollect()
 		notifyBenchEndHint()
@@ -24,6 +24,9 @@ func initializeHandler(*HandlerContext) echo.HandlerFunc {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
+			return err
+		}
+		if err := purgeAllSessions(c.Request().Context(), h); err != nil {
 			return err
 		}
 

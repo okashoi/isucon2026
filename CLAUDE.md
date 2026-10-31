@@ -33,7 +33,7 @@ make etc-sync/deploy/apply    # /etc へ反映
 make isubench/check           # 録画した通信を再生して正常版と比較
 ```
 
-アプリをローカルで起動するには PostgreSQL が必要で、接続先は環境変数 `ISUREAL_DB_HOST` / `PORT` / `USER` / `PASSWORD` / `NAME` で渡す。待ち受けは API が `:8080`、pprof が `:19001`。`POST /api/initialize` は実行時のカレントディレクトリからの相対パス `../sql/init.sh` を呼ぶので、`go/` で起動し、psql も必要になる。
+アプリをローカルで起動するには PostgreSQL が必要で、接続先は環境変数 `ISUREAL_DB_HOST` / `PORT` / `USER` / `PASSWORD` / `NAME` で渡す。待ち受けは API が `:8080`、pprof が `:19001`。`POST /api/initialize` は実行時のカレントディレクトリからの相対パス `../sql/init.sh` を呼ぶので、`go/` で起動し、psql も必要になる。初期化は他リージョンのアプリサーバにも送るので、1 台で動かすときは `ISUREAL_PEER_URL_ASIA` / `EUROPE` / `AMERICA` を自分（`http://127.0.0.1:8080`）に向ける。
 
 ## アーキテクチャ
 

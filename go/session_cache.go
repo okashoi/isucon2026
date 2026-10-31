@@ -1,0 +1,100 @@
+package isureal
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+	"sync"
+	"time"
+
+	"github.com/labstack/echo/v5"
+)
+
+const peerRequestTimeout = 5 * time.Second
+
+var peerClient = &http.Client{Timeout: peerRequestTimeout}
+
+// SessionCache は token_hash からログインセッションを引く。
+// 持つのはサーバのリージョンに所属する利用者のセッションだけなので、
+// 破棄が必要になるのは利用者が所属するリージョンの 1 台に限られる。
+type SessionCache struct {
+	mu                sync.RWMutex
+	generation        uint64
+	sessions          map[string]Session
+	tokenHashByUserID map[string]string
+}
+
+func NewSessionCache() *SessionCache {
+	return &SessionCache{sessions: map[string]Session{}, tokenHashByUserID: map[string]string{}}
+}
+
+func (c *SessionCache) PurgeUser(userID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.generation++
+	delete(c.sessions, c.tokenHashByUserID[userID])
+	delete(c.tokenHashByUserID, userID)
+}
+
+func (c *SessionCache) PurgeAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.generation++
+	clear(c.sessions)
+	clear(c.tokenHashByUserID)
+}
+
+// purgeUserSession はセッションや所属リージョンの変更を commit したあと、応答を返す前に呼ぶ。
+// region は変更前の所属リージョン。
+func purgeUserSession(ctx context.Context, h *HandlerContext, region, userID string) error {
+	if region == h.Config.Region {
+		h.Sessions.PurgeUser(userID)
+		return nil
+	}
+	return requestPeerPurge(ctx, h.Config.PeerURLs[region]+"/internal/session-cache/"+url.PathEscape(userID))
+}
+
+func purgeAllSessions(ctx context.Context, h *HandlerContext) error {
+	h.Sessions.PurgeAll()
+	for region, peerURL := range h.Config.PeerURLs {
+		if region == h.Config.Region {
+			continue
+		}
+		if err := requestPeerPurge(ctx, peerURL+"/internal/session-cache"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// requestPeerPurge は commit 済みの変更を反映するので、クライアントが切断しても中断しない。
+func requestPeerPurge(ctx context.Context, target string) error {
+	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), http.MethodDelete, target, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create session cache purge request: %w", err)
+	}
+	res, err := peerClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to purge session cache: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("failed to purge session cache: %s: %s", target, res.Status)
+	}
+	return nil
+}
+
+func purgeAllSessionsHandler(h *HandlerContext) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		h.Sessions.PurgeAll()
+		return c.NoContent(http.StatusNoContent)
+	}
+}
+
+func purgeUserSessionHandler(h *HandlerContext) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		h.Sessions.PurgeUser(c.Param("userId"))
+		return c.NoContent(http.StatusNoContent)
+	}
+}

@@ -78,31 +78,32 @@ func SessionMiddleware(handlerContext *HandlerContext, authRequired bool) echo.M
 	}
 }
 
-func InvalidateLoginSession(db *sqlx.DB, userID string, tokenHash string) error {
+// InvalidateLoginSession は users 行のロックの下で読んだ所属リージョンを返す。
+func InvalidateLoginSession(db *sqlx.DB, userID string, tokenHash string) (string, error) {
 	tx, err := db.Beginx()
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return "", fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	var lockedUserID string
-	if err := tx.Get(&lockedUserID, `SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
-		return fmt.Errorf("failed to lock user: %w", err)
+	var region string
+	if err := tx.Get(&region, `SELECT region FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
+		return "", fmt.Errorf("failed to lock user: %w", err)
 	}
 
 	if _, err := tx.Exec(`
 		UPDATE login_sessions
 		SET active = false, invalidated_at = clock_timestamp(), reason = 'logout'
-		WHERE user_id = $1 AND active = true AND token_hash = $2	
+		WHERE user_id = $1 AND active = true AND token_hash = $2
 	`, userID, tokenHash); err != nil {
-		return fmt.Errorf("failed to invalidate sessions: %w", err)
+		return "", fmt.Errorf("failed to invalidate sessions: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return "", fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	return nil
+	return region, nil
 }
 
 // 2026-09-03: リファクタリング後にこの関数の利用がないようです。消すのはいかがでしょうか
