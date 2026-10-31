@@ -14,10 +14,11 @@ import (
 const maxDBConns = 100
 
 type HandlerContext struct {
-	DB       *sqlx.DB
-	Config   *Config
-	IPBans   *IPBanList
-	Sessions *SessionCache
+	DB         *sqlx.DB
+	Config     *Config
+	IPBans     *IPBanList
+	Sessions   *SessionCache
+	PostImages *PostImageStore
 }
 
 func NewServer(config *Config) *echo.Echo {
@@ -43,17 +44,25 @@ func NewServer(config *Config) *echo.Echo {
 		panic("failed to ping database: " + err.Error())
 	}
 
+	postImages, err := NewPostImageStore()
+	if err != nil {
+		panic("failed to prepare post image directory: " + err.Error())
+	}
 	handlerContext := &HandlerContext{
-		DB:       db,
-		Config:   config,
-		IPBans:   &IPBanList{},
-		Sessions: NewSessionCache(),
+		DB:         db,
+		Config:     config,
+		IPBans:     &IPBanList{},
+		Sessions:   NewSessionCache(),
+		PostImages: postImages,
 	}
 	e.Use(IPBanMiddleware(handlerContext))
 
 	// 他のアプリサーバが :8080 へ直接送る。nginx は /api/ だけを転送するので、ルーターの公開先からは届かない。
 	e.DELETE("/internal/session-cache", purgeAllSessionsHandler(handlerContext))
 	e.DELETE("/internal/session-cache/:userId", purgeUserSessionHandler(handlerContext))
+	e.DELETE("/internal/image-cache", purgeImageCacheHandler(handlerContext))
+	// make post-images/sync が asia1 へ送る。
+	e.POST("/internal/post-image-cache", fillPostImageCacheHandler(handlerContext))
 
 	e.POST("/api/initialize", initializeHandler(handlerContext))
 	e.POST("/api/auth/register", registerHandler(handlerContext))

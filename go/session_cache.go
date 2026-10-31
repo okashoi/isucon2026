@@ -98,15 +98,15 @@ func purgeAllSessions(ctx context.Context, h *HandlerContext) error {
 func requestPeerPurge(ctx context.Context, target string) error {
 	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), http.MethodDelete, target, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create session cache purge request: %w", err)
+		return fmt.Errorf("failed to create peer cache purge request: %w", err)
 	}
 	res, err := peerClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to purge session cache: %w", err)
+		return fmt.Errorf("failed to purge peer cache: %w", err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("failed to purge session cache: %s: %s", target, res.Status)
+		return fmt.Errorf("failed to purge peer cache: %s: %s", target, res.Status)
 	}
 	return nil
 }

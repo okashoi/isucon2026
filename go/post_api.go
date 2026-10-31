@@ -158,6 +158,8 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		keepImage = true
+		// 失敗しても投稿は確定している。取得とエクスポートはファイルが無い画像だけ DB から取る。
+		_ = h.PostImages.Save(imageID, imageData)
 		return c.JSON(http.StatusCreated, newPostResponse(post, user))
 	}
 }

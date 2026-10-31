@@ -35,6 +35,15 @@ deploy: build
 		ssh $$h "mv $(REMOTE_APP_BIN).new $(REMOTE_APP_BIN) && sudo systemctl restart $(APPNAME)"; \
 	done
 
+# 初期データの画像を asia1 で DB から書き出し、europe1 / america1 へ配る。画像の取得とエクスポートが使う。
+# 初期化では書き出さないので、アプリの起動後、ベンチの前に実行する。足りないファイルだけを扱うので繰り返してよい。
+POST_IMAGE_DIR := /home/isucon/webapp/post-images
+POST_IMAGE_SOURCE := isucon-s1
+POST_IMAGE_TARGETS := isucon-s2 isucon-s3
+post-images/sync:
+	ssh $(POST_IMAGE_SOURCE) "curl -fsS -X POST http://127.0.0.1:8080/internal/post-image-cache"
+	$(foreach h,$(POST_IMAGE_TARGETS),ssh $(POST_IMAGE_SOURCE) "rsync -a --ignore-existing --exclude='*.tmp' $(POST_IMAGE_DIR)/ $(h):$(POST_IMAGE_DIR)/";)
+
 logs: limit=10000
 logs: opts=
 logs:
