@@ -127,4 +127,81 @@ BEGIN
 END;
 $$;
 
+-- Go の userPairAdvisoryKey と同じ値を返す。
+CREATE OR REPLACE FUNCTION user_pair_advisory_key(p_a text, p_b text) RETURNS bigint LANGUAGE sql IMMUTABLE AS $$
+  SELECT ('x' || encode(substring(
+    sha256(convert_to(LEAST(p_a COLLATE "C", p_b COLLATE "C"), 'UTF8') || '\x00'::bytea || convert_to(GREATEST(p_a COLLATE "C", p_b COLLATE "C"), 'UTF8'))
+    FROM 1 FOR 8), 'hex'))::bit(64)::bigint;
+$$;
+
+-- p_status は accepted / rejected / cancelled。
+-- result は ok / not_found / forbidden / conflict / invalid で、ok のときだけ relation_* が入る。
+CREATE OR REPLACE FUNCTION transition_friend_request(
+  p_actor text,
+  p_request_id text,
+  p_status text,
+  OUT result text,
+  OUT relation_id text,
+  OUT relation_status text,
+  OUT relation_updated_at timestamptz
+) LANGUAGE plpgsql AS $$
+DECLARE
+  v_requester_id text;
+  v_recipient_id text;
+  v_active_users integer;
+  v_current_status text;
+BEGIN
+  SELECT requester_id, recipient_id INTO v_requester_id, v_recipient_id FROM friend_requests WHERE id = p_request_id;
+  IF NOT FOUND THEN
+    result := 'not_found';
+    RETURN;
+  END IF;
+  IF (p_status = 'cancelled' AND p_actor <> v_requester_id) OR (p_status <> 'cancelled' AND p_actor <> v_recipient_id) THEN
+    result := 'forbidden';
+    RETURN;
+  END IF;
+  IF v_requester_id = v_recipient_id THEN
+    result := 'invalid';
+    RETURN;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(user_pair_advisory_key(v_requester_id, v_recipient_id));
+
+  SELECT count(*) INTO v_active_users FROM (
+    SELECT 1 FROM users
+    WHERE id IN (v_requester_id, v_recipient_id) AND status = 'active'
+    ORDER BY id
+    FOR KEY SHARE
+  ) AS locked;
+  IF v_active_users <> 2 THEN
+    result := 'not_found';
+    RETURN;
+  END IF;
+
+  SELECT status INTO STRICT v_current_status FROM friend_requests WHERE id = p_request_id;
+  IF v_current_status <> 'pending' THEN
+    result := 'forbidden';
+    RETURN;
+  END IF;
+
+  IF p_status = 'accepted' THEN
+    IF EXISTS (
+      SELECT 1 FROM block_relations
+      WHERE (blocker_id = v_requester_id AND blocked_id = v_recipient_id) OR (blocker_id = v_recipient_id AND blocked_id = v_requester_id)
+    ) THEN
+      result := 'conflict';
+      RETURN;
+    END IF;
+    INSERT INTO friendships (id, user_low_id, user_high_id, source_request_id)
+    VALUES (gen_random_uuid(), LEAST(v_requester_id, v_recipient_id), GREATEST(v_requester_id, v_recipient_id), p_request_id);
+  END IF;
+
+  UPDATE friend_requests SET status = p_status, updated_at = clock_timestamp()
+  WHERE id = p_request_id
+  RETURNING id, status, updated_at INTO relation_id, relation_status, relation_updated_at;
+
+  result := 'ok';
+END;
+$$;
+
 COMMIT;
