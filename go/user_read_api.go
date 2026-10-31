@@ -50,7 +50,7 @@ func searchUsersHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		query := normalizeSearchText(input.Q)
-		items := make([]relationshipUserResponse, 0)
+		matched := users[:0:0]
 		for _, user := range users {
 			if !strings.Contains(normalizeSearchText(user.Username), query) && !strings.Contains(normalizeSearchText(user.DisplayName), query) {
 				continue
@@ -61,13 +61,22 @@ func searchUsersHandler(h *HandlerContext) echo.HandlerFunc {
 			if err := user.setImageKey(); err != nil {
 				return err
 			}
+			matched = append(matched, user)
+			if len(matched) == 51 {
+				break
+			}
+		}
+		var signatures imageSignatureBatch
+		for _, user := range matched {
+			signatures.addProfileImage(user)
+		}
+		signatures.sign()
+		items := make([]relationshipUserResponse, 0, len(matched))
+		for _, user := range matched {
 			if user.AccountType != "certified_public" {
 				user.Bio = ""
 			}
 			items = append(items, newRelationshipUserResponse(user))
-			if len(items) == 51 {
-				break
-			}
 		}
 		hasMore := len(items) > 50
 		if hasMore {

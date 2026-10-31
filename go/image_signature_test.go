@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"strconv"
 	"testing"
+	"time"
 )
 
 func TestComputeImageSignatureMatchesRepeatedHMAC(t *testing.T) {
@@ -52,6 +53,91 @@ func BenchmarkComputeImageSignature(b *testing.B) {
 			}
 		})
 	}
+}
+
+func TestComputeImageSignaturesX16MatchesRepeatedHMAC(t *testing.T) {
+	if !hasSHA256X16 {
+		t.Skip("AVX-512 がない")
+	}
+	cases := []struct {
+		name string
+		n    int
+	}{
+		{name: "one lane", n: 1},
+		{name: "partial lanes", n: 5},
+		{name: "all lanes", n: 16},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inputs := make([]imageSignatureInput, tc.n)
+			for i := range inputs {
+				key := bytes.Repeat([]byte{byte(i + 1)}, sha256.Size)
+				if i%4 == 3 {
+					key = []byte("short")
+				}
+				inputs[i] = imageSignatureInput{key: key, imageID: strconv.Itoa(i) + "-11111111-1111-1111-1111-111111111111", exp: int64(1_800_000_000 + i)}
+			}
+			got := computeImageSignaturesX16(inputs)
+			if len(got) != len(inputs) {
+				t.Fatalf("len = %d, want %d", len(got), len(inputs))
+			}
+			for i, in := range inputs {
+				if want := imageSignatureReference(in.key, in.imageID, in.exp); !bytes.Equal(got[i], want) {
+					t.Fatalf("lane %d: signature = %x, want %x", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestImageSignatureBatchFillsCache(t *testing.T) {
+	if !hasSHA256X16 {
+		t.Skip("AVX-512 がない")
+	}
+	clearImageSignatureCache()
+	t.Cleanup(clearImageSignatureCache)
+	var batch imageSignatureBatch
+	for i := range 20 {
+		profileImageID := "profile-" + strconv.Itoa(i)
+		user := User{ImageKey: bytes.Repeat([]byte{byte(i + 1)}, sha256.Size), ProfileImageID: &profileImageID}
+		batch.addPost(Post{ImageID: "post-" + strconv.Itoa(i)}, user)
+		batch.addProfileImage(user)
+	}
+	batch.sign()
+	exp := imageSignatureExpiry(time.Now())
+	for _, input := range batch {
+		cacheKey, _ := newImageSignatureCacheKey(input.key, input.imageID, exp)
+		cached, ok := imageSignatureCache.Load(cacheKey)
+		if !ok {
+			// 分の境目をまたいだときは exp が変わるので、確かめられない。
+			t.Skipf("cache miss for %s (exp changed)", input.imageID)
+		}
+		if want := imageSignatureReference(input.key, input.imageID, exp); !bytes.Equal(cached.([]byte), want) {
+			t.Fatalf("%s: signature = %x, want %x", input.imageID, cached, want)
+		}
+	}
+}
+
+func BenchmarkComputeImageSignatures16(b *testing.B) {
+	inputs := make([]imageSignatureInput, 16)
+	for i := range inputs {
+		inputs[i] = imageSignatureInput{key: bytes.Repeat([]byte{byte(i + 1)}, sha256.Size), imageID: strconv.Itoa(i), exp: 1_800_000_000}
+	}
+	b.Run("x16", func(b *testing.B) {
+		if !hasSHA256X16 {
+			b.Skip("AVX-512 がない")
+		}
+		for b.Loop() {
+			computeImageSignaturesX16(inputs)
+		}
+	})
+	b.Run("sequential", func(b *testing.B) {
+		for b.Loop() {
+			for _, in := range inputs {
+				computeImageSignature(in.key, in.imageID, in.exp)
+			}
+		}
+	})
 }
 
 // imageSignatureReference は crypto/hmac をそのまま使う実装。

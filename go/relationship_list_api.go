@@ -75,12 +75,17 @@ func getRelationshipsHandler(h *HandlerContext) echo.HandlerFunc {
   `, actor, input.BeforeUpdatedAt, input.BeforeID); err != nil {
 			return err
 		}
+		var signatures imageSignatureBatch
+		for i := range records {
+			if err := records[i].User.setImageKey(); err != nil {
+				return err
+			}
+			signatures.addProfileImage(records[i].User)
+		}
+		signatures.sign()
 		items := make([]relationshipResponse, 0, len(records))
 		for _, record := range records {
 			user := record.User
-			if err := user.setImageKey(); err != nil {
-				return err
-			}
 			if user.AccountType != "certified_public" && input.Kind != "friends" {
 				user.Bio = ""
 			}

@@ -142,6 +142,12 @@ func getRealMojisHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
+		var signatures imageSignatureBatch
+		for _, reaction := range reactions {
+			signatures.addImage(reaction.Reactor, reaction.ImageID)
+			signatures.addProfileImage(reaction.Reactor)
+		}
+		signatures.sign()
 		items := make([]replaceRealMojiResponse, 0, len(reactions))
 		for _, reaction := range reactions {
 			items = append(items, newRealMojiResponse(reaction.RealMoji, reaction.Reactor))

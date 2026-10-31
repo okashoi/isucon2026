@@ -83,6 +83,11 @@ func listMemories(ctx context.Context, db sqlx.QueryerContext, userID string, st
 	if err != nil {
 		return response, err
 	}
+	var signatures imageSignatureBatch
+	for _, post := range posts {
+		signatures.addPost(post.Post, post.Author)
+	}
+	signatures.sign()
 	items := make([]memoryPostResponse, 0, len(posts))
 	for _, post := range posts {
 		items = append(items, memoryPostResponse{
@@ -121,6 +126,12 @@ func loadMemoryInteractions(ctx context.Context, db sqlx.QueryerContext, items [
 	if err != nil {
 		return err
 	}
+	var signatures imageSignatureBatch
+	for _, reaction := range reactions {
+		signatures.addImage(reaction.Reactor, reaction.ImageID)
+		signatures.addProfileImage(reaction.Reactor)
+	}
+	signatures.sign()
 	for _, reaction := range reactions {
 		item := itemByPostID[reaction.PostID]
 		if len(item.RealMojis) < 50 {
@@ -136,6 +147,11 @@ func loadMemoryInteractions(ctx context.Context, db sqlx.QueryerContext, items [
 	if err != nil {
 		return err
 	}
+	signatures = signatures[:0]
+	for _, comment := range comments {
+		signatures.addProfileImage(comment.Author)
+	}
+	signatures.sign()
 	for _, comment := range comments {
 		item := itemByPostID[comment.PostID]
 		if len(item.Comments) < 50 {

@@ -136,6 +136,126 @@ func repeatHMAC(mac hash.Hash, value []byte) []byte {
 	return value
 }
 
+// minImageSignatureBatch は 16 レーンでまとめて計算する最小の件数。
+// 1 回の呼び出しは 1 件でも 16 件でも同じ時間がかかり、1 件ずつ計算する 2〜3 件分にあたる。
+const minImageSignatureBatch = 3
+
+// imageSignatureBatch は応答に入れる画像 URL を集め、キャッシュにない署名を 16 件ずつまとめて計算してキャッシュに入れる。
+// 応答を組み立てる前に sign を呼ぶと、signedImageURL はキャッシュを引くだけになる。
+type imageSignatureBatch []imageSignatureInput
+
+func (b *imageSignatureBatch) addImage(owner User, imageID string) {
+	*b = append(*b, imageSignatureInput{key: owner.ImageKey, imageID: imageID})
+}
+
+func (b *imageSignatureBatch) addProfileImage(user User) {
+	if user.ProfileImageID != nil {
+		b.addImage(user, *user.ProfileImageID)
+	}
+}
+
+func (b *imageSignatureBatch) addPost(post Post, author User) {
+	b.addImage(author, post.ImageID)
+	b.addProfileImage(author)
+}
+
+func (b imageSignatureBatch) sign() {
+	if !hasSHA256X16 || len(b) < minImageSignatureBatch {
+		return
+	}
+	exp := imageSignatureExpiry(time.Now())
+	pending := make([]imageSignatureInput, 0, len(b))
+	seen := make(map[imageSignatureCacheKey]struct{}, len(b))
+	for _, input := range b {
+		cacheKey, ok := newImageSignatureCacheKey(input.key, input.imageID, exp)
+		if !ok {
+			continue
+		}
+		if _, ok := seen[cacheKey]; ok {
+			continue
+		}
+		seen[cacheKey] = struct{}{}
+		if _, ok := imageSignatureCache.Load(cacheKey); ok {
+			continue
+		}
+		input.exp = exp
+		pending = append(pending, input)
+	}
+	for len(pending) >= minImageSignatureBatch {
+		n := min(len(pending), 16)
+		for i, sig := range computeImageSignaturesX16(pending[:n]) {
+			cacheKey, _ := newImageSignatureCacheKey(pending[i].key, pending[i].imageID, exp)
+			imageSignatureCache.Store(cacheKey, sig)
+		}
+		pending = pending[n:]
+	}
+}
+
+type imageSignatureInput struct {
+	key     []byte
+	imageID string
+	exp     int64
+}
+
+var sha256IV = [8]uint32{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}
+
+// computeImageSignaturesX16 は最大 16 件の署名を、16 レーンの圧縮関数（sha256X16）でまとめて計算する。
+// 値は computeImageSignature と同じ。鍵は sha256.BlockSize 以下で、hasSHA256X16 が真のときだけ呼ぶ。
+func computeImageSignaturesX16(inputs []imageSignatureInput) [][]byte {
+	var inner, outer [8][16]uint32
+	for w := range sha256IV {
+		for l := range 16 {
+			inner[w][l] = sha256IV[w]
+			outer[w][l] = sha256IV[w]
+		}
+	}
+	// 空きのレーンは鍵が空として計算し、結果を捨てる。
+	var blocks [16][sha256.BlockSize]byte
+	for _, pad := range [2]struct {
+		state *[8][16]uint32
+		xor   byte
+	}{{&inner, 0x36}, {&outer, 0x5c}} {
+		for l := range blocks {
+			blocks[l] = [sha256.BlockSize]byte{}
+			if l < len(inputs) {
+				copy(blocks[l][:], inputs[l].key)
+			}
+			for i := range blocks[l] {
+				blocks[l][i] ^= pad.xor
+			}
+		}
+		sha256X16(pad.state, &blocks)
+	}
+
+	for l := range blocks {
+		blocks[l] = [sha256.BlockSize]byte{}
+		if l < len(inputs) {
+			mac := hmac.New(sha256.New, inputs[l].key)
+			mac.Write([]byte(strconv.FormatInt(inputs[l].exp, 10) + ":" + inputs[l].imageID))
+			mac.Sum(blocks[l][:0])
+		}
+		blocks[l][sha256.Size] = 0x80
+		binary.BigEndian.PutUint64(blocks[l][sha256.BlockSize-8:], (sha256.BlockSize+sha256.Size)*8)
+	}
+	for range imageSignatureIterations - 1 {
+		for _, state := range [2]*[8][16]uint32{&inner, &outer} {
+			digests := *state
+			sha256X16(&digests, &blocks)
+			for l := range blocks {
+				for w := range digests {
+					binary.BigEndian.PutUint32(blocks[l][w*4:], digests[w][l])
+				}
+			}
+		}
+	}
+
+	signatures := make([][]byte, len(inputs))
+	for l := range signatures {
+		signatures[l] = append([]byte(nil), blocks[l][:sha256.Size]...)
+	}
+	return signatures
+}
+
 // imageSignatureExpiry は期限を分境界へ切り上げる。同じ分に発行した URL が同じ exp になり、署名を再利用できる。
 // 切り上げなので、有効期限は 24 時間より短くならない。
 func imageSignatureExpiry(now time.Time) int64 {

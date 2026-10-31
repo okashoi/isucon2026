@@ -45,6 +45,11 @@ func exportPostsHandler(h *HandlerContext) echo.HandlerFunc {
 		var body bytes.Buffer
 		writer := zip.NewWriter(&body)
 		defer writer.Close()
+		var signatures imageSignatureBatch
+		for _, post := range posts {
+			signatures.addPost(post, author)
+		}
+		signatures.sign()
 		items := make([]exportPostResponse, 0, len(posts))
 		for _, post := range posts {
 			data, ok := images[post.ImageID]

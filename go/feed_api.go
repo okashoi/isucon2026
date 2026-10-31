@@ -103,20 +103,29 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 				return scores[candidates[i].ID] > scores[candidates[j].ID]
 			})
 		}
-		items := make([]feedItemResponse, 0)
+		selected := candidates[:0:0]
 		for _, post := range candidates {
-			score := scores[post.ID]
-			if ranked && input.BeforeScore != nil && !rankedBefore(score, post.Post, *input.BeforeScore, *input.BeforePostedAt, input.BeforeID) {
+			if ranked && input.BeforeScore != nil && !rankedBefore(scores[post.ID], post.Post, *input.BeforeScore, *input.BeforePostedAt, input.BeforeID) {
 				continue
 			}
+			selected = append(selected, post)
+			if len(selected) == feedPageLimit {
+				break
+			}
+		}
+		var signatures imageSignatureBatch
+		for _, post := range selected {
+			signatures.addPost(post.Post, post.Author)
+		}
+		signatures.sign()
+		items := make([]feedItemResponse, 0)
+		for _, post := range selected {
 			item := feedItemResponse{createPostResponse: newPostResponse(post.Post, post.Author)}
 			if ranked {
+				score := scores[post.ID]
 				item.Score = &score
 			}
 			items = append(items, item)
-			if len(items) == feedPageLimit {
-				break
-			}
 		}
 		hasMore := len(items) == feedPageLimit
 		if hasMore {
