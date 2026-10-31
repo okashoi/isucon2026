@@ -1,6 +1,7 @@
 package isureal
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"io"
@@ -60,8 +61,6 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		imageID := uuid.NewString()
-		imageBody := h.PostImages.Replicate(ctx, imageID, data)
 		post, err := getPost(ctx, h.DB, input.PostID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
@@ -72,6 +71,20 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		if actor == post.AuthorID {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
+		// 本体は先に全アプリへ配る。関係ロックを握る前に待ち、空 data なら WAL は小さい。
+		imageID := uuid.NewString()
+		imageCreatedAt := time.Now().UTC()
+		imageBody := h.PostImages.Replicate(ctx, imageID, data)()
+		if err := insertImageObjectLocalSync(ctx, h.DB, imageID, actor, imageBody, imageCreatedAt); err != nil {
+			return err
+		}
+		keepImage := false
+		defer func() {
+			if keepImage {
+				return
+			}
+			_ = deleteImageObjectLocalSync(context.Background(), h.DB, imageID, imageCreatedAt)
+		}()
 		tx, err := beginRelationshipTx(ctx, h.DB, actor, post.AuthorID)
 		if err != nil {
 			return err
@@ -85,9 +98,6 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE realmojis SET replaced_at=clock_timestamp() WHERE post_id=$1 AND reactor_id=$2 AND replaced_at IS NULL AND deleted_at IS NULL`, post.ID, actor); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type) VALUES($1,$2,$3,'image/jpeg')`, preparedQuery, imageID, actor, imageBody()); err != nil {
 			return err
 		}
 		id := uuid.NewString()
@@ -105,6 +115,7 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		keepImage = true
 		return c.JSON(http.StatusCreated, newRealMojiResponse(reaction, user))
 	}
 }
