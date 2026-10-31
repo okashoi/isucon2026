@@ -17,12 +17,19 @@ func deleteAccountHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		var lockedID string
-		err = tx.GetContext(ctx, &lockedID, `SELECT id FROM users WHERE id=$1 AND status='active' FOR NO KEY UPDATE`, userID)
+		var locked struct {
+			ID     string `db:"id"`
+			Region string `db:"region"`
+		}
+		err = tx.GetContext(ctx, &locked, `SELECT id, region FROM users WHERE id=$1 AND status='active' FOR NO KEY UPDATE`, userID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusNotFound, "account_not_found")
 		}
 		if err != nil {
+			return err
+		}
+		// 行ロックのあとでリージョンを取る。期間開始は行をロックしないので、逆順だとデッドロックする。
+		if err := lockRegionMemberships(ctx, tx, locked.Region); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE users SET status='deleted', deleted_at=clock_timestamp(), updated_at=clock_timestamp() WHERE id=$1`, userID); err != nil {
