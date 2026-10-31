@@ -14,10 +14,11 @@ import (
 const maxDBConns = 100
 
 type HandlerContext struct {
-	DB       *sqlx.DB
-	Config   *Config
-	IPBans   *IPBanList
-	Sessions *SessionCache
+	DB         *sqlx.DB
+	Config     *Config
+	IPBans     *IPBanList
+	Sessions   *SessionCache
+	PostImages *PostImageStore
 }
 
 func NewServer(config *Config) *echo.Echo {
@@ -43,11 +44,16 @@ func NewServer(config *Config) *echo.Echo {
 		panic("failed to ping database: " + err.Error())
 	}
 
+	postImages, err := NewPostImageStore()
+	if err != nil {
+		panic("failed to prepare post image directory: " + err.Error())
+	}
 	handlerContext := &HandlerContext{
-		DB:       db,
-		Config:   config,
-		IPBans:   &IPBanList{},
-		Sessions: NewSessionCache(),
+		DB:         db,
+		Config:     config,
+		IPBans:     &IPBanList{},
+		Sessions:   NewSessionCache(),
+		PostImages: postImages,
 	}
 	e.Use(IPBanMiddleware(handlerContext))
 
@@ -56,6 +62,7 @@ func NewServer(config *Config) *echo.Echo {
 	e.DELETE("/internal/session-cache/:userId", purgeUserSessionHandler(handlerContext))
 
 	e.POST("/api/initialize", initializeHandler(handlerContext))
+	e.POST("/api/internal/post-image-cache", warmPostImageCacheHandler(handlerContext))
 	e.POST("/api/auth/register", registerHandler(handlerContext))
 	e.POST("/api/auth/login", loginHandler(handlerContext))
 	e.POST("/api/auth/logout", logoutHandler(handlerContext), SessionMiddleware(handlerContext, true))
