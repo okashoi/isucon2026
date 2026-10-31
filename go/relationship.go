@@ -25,9 +25,16 @@ func getFriendRequest(ctx context.Context, db sqlx.QueryerContext, id string) (F
 	return request, err
 }
 
-func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string) (*sqlx.Tx, error) {
+func validateRelationshipTarget(actor, target string) error {
 	if actor == target || target == "" {
-		return nil, NewAPIError(http.StatusBadRequest, "invalid_relationship")
+		return NewAPIError(http.StatusBadRequest, "invalid_relationship")
+	}
+	return nil
+}
+
+func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string) (*sqlx.Tx, error) {
+	if err := validateRelationshipTarget(actor, target); err != nil {
+		return nil, err
 	}
 	tx, err := db.BeginTxx(ctx, nil)
 	if err != nil {
