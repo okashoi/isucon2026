@@ -11,7 +11,7 @@ import (
 )
 
 // アプリサーバ3台の合計が PostgreSQL の max_connections = 100 に収まるようにする。
-const maxDBConns = 30
+const maxDBConns = 100
 
 type HandlerContext struct {
 	DB     *sqlx.DB
