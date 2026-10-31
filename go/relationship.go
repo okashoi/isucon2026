@@ -6,24 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
-
-type FriendRequest struct {
-	ID          string    `db:"id"`
-	RequesterID string    `db:"requester_id"`
-	RecipientID string    `db:"recipient_id"`
-	Status      string    `db:"status"`
-	CreatedAt   time.Time `db:"created_at"`
-	UpdatedAt   time.Time `db:"updated_at"`
-}
-
-func getFriendRequest(ctx context.Context, db sqlx.QueryerContext, id string) (FriendRequest, error) {
-	var request FriendRequest
-	err := sqlx.GetContext(ctx, db, &request, `SELECT id, requester_id, recipient_id, status, created_at, updated_at FROM friend_requests WHERE id=$1`, id)
-	return request, err
-}
 
 func validateRelationshipTarget(actor, target string) error {
 	if actor == target || target == "" {
@@ -52,16 +36,22 @@ func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string)
 	return tx, nil
 }
 
-type createFriendRequestResult struct {
+type friendRequestResult struct {
 	Result     string     `db:"result"`
 	RelationID *string    `db:"relation_id"`
 	Status     *string    `db:"relation_status"`
 	UpdatedAt  *time.Time `db:"relation_updated_at"`
 }
 
-func createFriendRequest(ctx context.Context, db sqlx.QueryerContext, actor, target string) (createFriendRequestResult, error) {
-	var result createFriendRequestResult
+func createFriendRequest(ctx context.Context, db sqlx.QueryerContext, actor, target string) (friendRequestResult, error) {
+	var result friendRequestResult
 	err := sqlx.GetContext(ctx, db, &result, `SELECT result, relation_id, relation_status, relation_updated_at FROM create_friend_request($1, $2, $3::bigint)`, actor, target, userPairAdvisoryKey(actor, target))
+	return result, err
+}
+
+func transitionFriendRequest(ctx context.Context, db sqlx.QueryerContext, actor, requestID, status string) (friendRequestResult, error) {
+	var result friendRequestResult
+	err := sqlx.GetContext(ctx, db, &result, `SELECT result, relation_id, relation_status, relation_updated_at FROM transition_friend_request($1, $2, $3)`, actor, requestID, status)
 	return result, err
 }
 
@@ -69,11 +59,6 @@ func isBlocked(ctx context.Context, db sqlx.QueryerContext, actor, target string
 	var blocked bool
 	err := sqlx.GetContext(ctx, db, &blocked, `SELECT EXISTS(SELECT 1 FROM block_relations WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1))`, actor, target)
 	return blocked, err
-}
-
-func insertFriendship(ctx context.Context, tx *sqlx.Tx, request FriendRequest) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO friendships (id, user_low_id, user_high_id, source_request_id) VALUES ($1,$2,$3,$4)`, uuid.NewString(), min(request.RequesterID, request.RecipientID), max(request.RequesterID, request.RecipientID), request.ID)
-	return err
 }
 
 func requireRelationshipChange(result sql.Result, err error, status int, code string) error {
