@@ -41,6 +41,7 @@ SELECT id, blocker_id, blocked_id, created_at FROM initial_block_relations;
 
 CREATE INDEX IF NOT EXISTS posts_image_id_author_id ON posts(image_id, author_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS posts_author_posted_at_id ON posts(author_id, posted_at, id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS posts_window_posted_at_id ON posts(posting_window_id, posted_at DESC, id DESC) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS realmojis_image_id_reactor_id ON realmojis(image_id, reactor_id) WHERE replaced_at IS NULL AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS friendships_user_high_id ON friendships(user_high_id);
 CREATE INDEX IF NOT EXISTS users_region_status ON users(region, status);
