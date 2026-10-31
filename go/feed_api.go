@@ -4,13 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v5"
 )
+
+// feedPageLimit は 1 ページ 50 件の次があるかを見るための件数。
+const feedPageLimit = 51
 
 type getFeedRequest struct {
 	Feed           string     `param:"feed"`
@@ -55,6 +61,9 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
+		if !viewer.HasPostedToday {
+			return c.JSON(http.StatusOK, getFeedResponse{Items: []feedItemResponse{}})
+		}
 		following := map[string]bool{}
 		if input.Feed == "following" {
 			var followeeIDs []string
@@ -69,11 +78,7 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 		if ranked {
 			beforePostedAt, beforeID = nil, ""
 		}
-		posts, err := selectPostsWithAuthor(ctx, h.ReadDB, `
-   AND p.author_id <> $1 AND w.ended_at IS NULL
-   AND ($2::timestamptz IS NULL OR (p.posted_at, p.id) < ($2, $3))
-   ORDER BY p.posted_at DESC, p.id DESC
-  `, viewer.ID, beforePostedAt, beforeID)
+		posts, err := selectFeedPosts(ctx, h.ReadDB, viewer, following, input.Feed, beforePostedAt, beforeID)
 		if err != nil {
 			return err
 		}
@@ -103,16 +108,152 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 				item.Score = &score
 			}
 			items = append(items, item)
-			if len(items) == 51 {
+			if len(items) == feedPageLimit {
 				break
 			}
 		}
-		hasMore := len(items) > 50
+		hasMore := len(items) == feedPageLimit
 		if hasMore {
-			items = items[:50]
+			items = items[:feedPageLimit-1]
 		}
 		return c.JSON(http.StatusOK, getFeedResponse{Items: items, HasMore: hasMore})
 	}
+}
+
+// selectFeedPosts は canView と matchesFeed と同じ投稿だけを読む。
+// 友達・フォロー・公開は posted_at 順の 51 件で止める。ここで余分な行を返すと、後段が落とした分だけページが欠ける。
+// 友達の友達はスコア順なので、時刻では切らず作者で絞る。
+func selectFeedPosts(ctx context.Context, db sqlx.QueryerContext, viewer viewerContext, following map[string]bool, feed string, beforePostedAt *time.Time, beforeID string) ([]PostWithAuthor, error) {
+	switch feed {
+	case "friends":
+		authors := idList(viewer.Friends, viewer.ID, viewer.Blocked)
+		return selectAuthorFeed(ctx, db, viewer.ID, authors, []string{"public", "friends", "friends_of_friends"}, beforePostedAt, beforeID, true)
+	case "public":
+		return selectPublicFeed(ctx, db, viewer, beforePostedAt, beforeID)
+	case "following":
+		return selectFollowingFeed(ctx, db, viewer, following, beforePostedAt, beforeID)
+	case "friends-of-friends":
+		authors := idList(viewer.FriendsOfFriends, viewer.ID, viewer.Friends, viewer.Blocked)
+		return selectAuthorFeed(ctx, db, viewer.ID, authors, []string{"public", "friends_of_friends"}, nil, "", false)
+	default:
+		return []PostWithAuthor{}, nil
+	}
+}
+
+func selectAuthorFeed(ctx context.Context, db sqlx.QueryerContext, viewerID string, authors, visibilities []string, before *time.Time, beforeID string, limit bool) ([]PostWithAuthor, error) {
+	if len(authors) == 0 {
+		return []PostWithAuthor{}, nil
+	}
+	condition := `
+  AND w.ended_at IS NULL
+  AND p.author_id <> ?
+  AND p.author_id IN (?)
+  AND p.visibility IN (?)`
+	args := []any{viewerID, authors, visibilities}
+	condition, args = appendFeedSeek(condition, args, before, beforeID)
+	condition += ` ORDER BY p.posted_at DESC, p.id DESC`
+	if limit {
+		condition += fmt.Sprintf(` LIMIT %d`, feedPageLimit)
+	}
+	return queryFeedPosts(ctx, db, condition, args)
+}
+
+func selectPublicFeed(ctx context.Context, db sqlx.QueryerContext, viewer viewerContext, before *time.Time, beforeID string) ([]PostWithAuthor, error) {
+	condition := `
+  AND w.ended_at IS NULL
+  AND p.author_id <> ?
+  AND p.visibility = 'public'`
+	args := []any{viewer.ID}
+	if blocked := idList(viewer.Blocked, ""); len(blocked) > 0 {
+		condition += ` AND p.author_id NOT IN (?)`
+		args = append(args, blocked)
+	}
+	condition, args = appendFeedSeek(condition, args, before, beforeID)
+	condition += fmt.Sprintf(` ORDER BY p.posted_at DESC, p.id DESC LIMIT %d`, feedPageLimit)
+	return queryFeedPosts(ctx, db, condition, args)
+}
+
+func selectFollowingFeed(ctx context.Context, db sqlx.QueryerContext, viewer viewerContext, following map[string]bool, before *time.Time, beforeID string) ([]PostWithAuthor, error) {
+	followees := make([]string, 0, len(following))
+	for id := range following {
+		if id == viewer.ID || viewer.Blocked[id] {
+			continue
+		}
+		followees = append(followees, id)
+	}
+	slices.Sort(followees)
+	if len(followees) == 0 {
+		return []PostWithAuthor{}, nil
+	}
+	visibilitySQL, visibilityArgs := followingVisibilitySQL(viewer)
+	condition := `
+  AND w.ended_at IS NULL
+  AND p.author_id <> ?
+  AND p.author_id IN (?)
+  AND ` + visibilitySQL
+	args := append([]any{viewer.ID, followees}, visibilityArgs...)
+	condition, args = appendFeedSeek(condition, args, before, beforeID)
+	condition += fmt.Sprintf(` ORDER BY p.posted_at DESC, p.id DESC LIMIT %d`, feedPageLimit)
+	return queryFeedPosts(ctx, db, condition, args)
+}
+
+// followingVisibilitySQL はフォロー中の作者に対する canView の公開範囲。
+// 友達なら 3 種、友達の友達なら public と friends_of_friends、それ以外は public だけ。
+func followingVisibilitySQL(viewer viewerContext) (string, []any) {
+	parts := []string{"p.visibility = 'public'"}
+	var args []any
+	if friends := idList(viewer.Friends, viewer.ID); len(friends) > 0 {
+		parts = append(parts, "(p.visibility = 'friends' AND p.author_id IN (?))")
+		args = append(args, friends)
+	}
+	friendOrFoF := make(map[string]bool, len(viewer.Friends)+len(viewer.FriendsOfFriends))
+	for id := range viewer.Friends {
+		friendOrFoF[id] = true
+	}
+	for id := range viewer.FriendsOfFriends {
+		friendOrFoF[id] = true
+	}
+	if visible := idList(friendOrFoF, viewer.ID); len(visible) > 0 {
+		parts = append(parts, "(p.visibility = 'friends_of_friends' AND p.author_id IN (?))")
+		args = append(args, visible)
+	}
+	return "(" + strings.Join(parts, " OR ") + ")", args
+}
+
+func appendFeedSeek(condition string, args []any, before *time.Time, beforeID string) (string, []any) {
+	if before == nil {
+		return condition, args
+	}
+	return condition + ` AND (p.posted_at, p.id) < (?::timestamptz, ?)`, append(args, *before, beforeID)
+}
+
+func queryFeedPosts(ctx context.Context, db sqlx.QueryerContext, condition string, args []any) ([]PostWithAuthor, error) {
+	condition, args, err := sqlx.In(condition, args...)
+	if err != nil {
+		return nil, err
+	}
+	return selectPostsWithAuthor(ctx, db, sqlx.Rebind(sqlx.DOLLAR, condition), args...)
+}
+
+func idList(include map[string]bool, self string, skip ...map[string]bool) []string {
+	if len(include) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(include))
+next:
+	for id := range include {
+		if self != "" && id == self {
+			continue
+		}
+		for _, skipped := range skip {
+			if skipped[id] {
+				continue next
+			}
+		}
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 func rankedBefore(score int64, post Post, beforeScore int64, beforePostedAt time.Time, beforeID string) bool {
