@@ -89,10 +89,7 @@ func registerHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		// 同じリージョンの在籍変更と投稿期間開始を直列化する。ユーザー名の一意性は UNIQUE 制約が持つ。
-		if err := lockRegionMemberships(ctx, tx, input.Region); err != nil {
-			return err
-		}
+		// ユーザー名の一意性は UNIQUE 制約が持つ。投稿期間の開始とは行を共有しない。
 		userID := uuid.NewString()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO users (id, username, secret_key_hash, display_name, region) VALUES ($1, $2, $3, $4, $5)`,
 			userID, input.Username, hex.EncodeToString(hash[:]), input.DisplayName, input.Region); err != nil {
@@ -217,11 +214,6 @@ func updateMeHandler(h *HandlerContext) echo.HandlerFunc {
 					return NewAPIError(http.StatusNotFound, "account_not_found")
 				}
 				return err
-			}
-			if currentRegion != *input.Region {
-				if err := lockRegionMemberships(ctx, tx, currentRegion, *input.Region); err != nil {
-					return err
-				}
 			}
 		}
 		if input.DisplayName != nil {

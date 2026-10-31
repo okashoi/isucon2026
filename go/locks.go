@@ -18,10 +18,11 @@ type execerContext interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// リージョン在籍（登録・リージョン変更・退会・投稿期間の開始）を直列化する。
-// 投稿やコメントは在籍を変えないので、このロックは取らない。
+// 同じリージョンの投稿期間開始を直列化し、後続を posting_window_conflict で返す。
+// 登録・リージョン変更・退会は users だけを書き換え、開始処理は posting_windows だけを書く。
+// 通知の宛先は開始時に確定せず、ポーリングがコミット済みの在籍と期間を 1 文で読む。
 // pg_advisory_xact_lock(int, int) は bigint 版とロック空間が別なので、ペアロックと衝突しない。
-func lockRegionMemberships(ctx context.Context, db execerContext, regions ...string) error {
+func lockRegionPostingWindow(ctx context.Context, db execerContext, regions ...string) error {
 	keys, err := regionAdvisoryKeys(regions)
 	if err != nil {
 		return err
