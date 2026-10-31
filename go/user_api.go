@@ -89,10 +89,6 @@ func registerHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		// 同じリージョンの在籍変更と投稿期間開始を直列化する。ユーザー名の一意性は UNIQUE 制約が持つ。
-		if err := lockRegionMemberships(ctx, tx, input.Region); err != nil {
-			return err
-		}
 		userID := uuid.NewString()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO users (id, username, secret_key_hash, display_name, region, username_norm, display_name_norm) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 			userID, input.Username, hex.EncodeToString(hash[:]), input.DisplayName, input.Region, normalizeSearchText(input.Username), normalizeSearchText(input.DisplayName)); err != nil {

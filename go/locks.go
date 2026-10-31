@@ -18,8 +18,7 @@ type execerContext interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// リージョン在籍（登録・リージョン変更・退会・投稿期間の開始）を直列化する。
-// 投稿やコメントは在籍を変えないので、このロックは取らない。
+// 投稿期間の開始とリージョン変更・退会を直列化する。入れ替え中の移籍が古い local_date に載ると post_slot_unavailable になる。
 // pg_advisory_xact_lock(int, int) は bigint 版とロック空間が別なので、ペアロックと衝突しない。
 func lockRegionMemberships(ctx context.Context, db execerContext, regions ...string) error {
 	keys, err := regionAdvisoryKeys(regions)
