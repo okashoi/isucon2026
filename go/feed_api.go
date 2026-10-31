@@ -57,7 +57,7 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_pagination")
 		}
 		ctx := c.Request().Context()
-		viewer, err := loadViewerContext(ctx, h.ReadDB, GetSession(c).UserID)
+		viewer, err := loadViewerContext(ctx, h.ReadDB, h.Graph, GetSession(c).UserID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.JSON(http.StatusOK, getFeedResponse{Items: []feedItemResponse{}})
 		}
@@ -91,10 +91,13 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		candidates := make([]PostWithAuthor, 0)
-		for _, post := range posts {
-			if viewer.canView(post.Post) && matchesFeed(viewer, following, post.Post, input.Feed) {
-				candidates = append(candidates, post)
+		candidates := posts
+		if input.Feed != "friends" {
+			candidates = make([]PostWithAuthor, 0)
+			for _, post := range posts {
+				if viewer.canView(post.Post) && matchesFeed(viewer, following, post.Post, input.Feed) {
+					candidates = append(candidates, post)
+				}
 			}
 		}
 		var scores map[string]int64

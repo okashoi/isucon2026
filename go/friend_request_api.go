@@ -37,6 +37,11 @@ func createFriendRequestHandler(h *HandlerContext) echo.HandlerFunc {
 		case "conflict":
 			return NewAPIError(http.StatusConflict, "relationship_conflict")
 		}
+		if created.Status != nil && *created.Status == "accepted" {
+			if err := purgeGraphUsers(c.Request().Context(), h, actor, input.RecipientID); err != nil {
+				return err
+			}
+		}
 		return c.JSON(http.StatusCreated, createFriendRequestResponse{RelationID: *created.RelationID, Status: *created.Status, UpdatedAt: *created.UpdatedAt})
 	}
 }
@@ -78,6 +83,18 @@ func transitionFriendRequestHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusConflict, "relationship_conflict")
 		case "invalid":
 			return NewAPIError(http.StatusBadRequest, "invalid_relationship")
+		}
+		if status == "accepted" {
+			var pair struct {
+				RequesterID string `db:"requester_id"`
+				RecipientID string `db:"recipient_id"`
+			}
+			if err := h.DB.GetContext(c.Request().Context(), &pair, `SELECT requester_id, recipient_id FROM friend_requests WHERE id = $1`, input.RequestID); err != nil {
+				return err
+			}
+			if err := purgeGraphUsers(c.Request().Context(), h, pair.RequesterID, pair.RecipientID); err != nil {
+				return err
+			}
 		}
 		return c.JSON(http.StatusOK, transitionFriendRequestResponse{RelationID: *transitioned.RelationID, Status: *transitioned.Status, UpdatedAt: *transitioned.UpdatedAt})
 	}

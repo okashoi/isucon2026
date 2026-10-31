@@ -53,7 +53,7 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 		if _, err := lockUserPair(ctx, tx, actor, post.AuthorID); err != nil {
 			return err
 		}
-		allowed, err := canComment(ctx, tx, actor, post.ID)
+		allowed, err := canComment(ctx, tx, h.Graph, actor, post.ID)
 		if err != nil {
 			return err
 		}
@@ -100,7 +100,7 @@ func getCommentsHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_pagination")
 		}
 		ctx := c.Request().Context()
-		allowed, err := canComment(ctx, h.ReadDB, GetSession(c).UserID, input.PostID)
+		allowed, err := canComment(ctx, h.ReadDB, h.Graph, GetSession(c).UserID, input.PostID)
 		if err != nil {
 			return err
 		}

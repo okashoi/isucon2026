@@ -75,7 +75,7 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		allowed, err := canViewPost(ctx, tx, actor, post.ID)
+		allowed, err := canViewPost(ctx, tx, h.Graph, actor, post.ID)
 		if err != nil {
 			return err
 		}
@@ -139,7 +139,7 @@ func getRealMojisHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_pagination")
 		}
 		ctx := c.Request().Context()
-		allowed, err := canViewPost(ctx, h.ReadDB, GetSession(c).UserID, input.PostID)
+		allowed, err := canViewPost(ctx, h.ReadDB, h.Graph, GetSession(c).UserID, input.PostID)
 		if err != nil {
 			return err
 		}

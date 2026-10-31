@@ -184,7 +184,7 @@ func getPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		viewer, err := loadViewerContext(ctx, h.ReadDB, GetSession(c).UserID)
+		viewer, err := loadViewerContext(ctx, h.ReadDB, h.Graph, GetSession(c).UserID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}

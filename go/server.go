@@ -20,6 +20,7 @@ type HandlerContext struct {
 	IPBans     *IPBanList
 	Abuse      *AbuseDetector
 	Sessions   *SessionCache
+	Graph      *GraphCache
 	PostImages *PostImageStore
 	Windows    *PostingWindowHub
 }
@@ -66,6 +67,7 @@ func NewServer(config *Config) *echo.Echo {
 		IPBans:     &IPBanList{},
 		Abuse:      NewAbuseDetector(),
 		Sessions:   NewSessionCache(),
+		Graph:      NewGraphCache(),
 		PostImages: postImages,
 		Windows:    NewPostingWindowHub(),
 	}
@@ -75,6 +77,8 @@ func NewServer(config *Config) *echo.Echo {
 	// 他のアプリサーバが :8080 へ直接送る。nginx は /api/ だけを転送するので、ルーターの公開先からは届かない。
 	e.DELETE("/internal/session-cache", purgeAllSessionsHandler(handlerContext))
 	e.DELETE("/internal/session-cache/:userId", purgeUserSessionHandler(handlerContext))
+	e.DELETE("/internal/graph-cache", purgeAllGraphHandler(handlerContext))
+	e.DELETE("/internal/graph-cache/:userId", purgeUserGraphHandler(handlerContext))
 	e.DELETE("/internal/image-cache", purgeImageCacheHandler(handlerContext))
 	e.DELETE("/internal/abuse-state", purgeAbuseStateHandler(handlerContext))
 	e.GET("/internal/images/:imageId", getOriginImageHandler(handlerContext))

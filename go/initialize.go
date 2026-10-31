@@ -34,6 +34,9 @@ func initializeHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := purgeAllSessions(c.Request().Context(), h); err != nil {
 			return err
 		}
+		if err := purgeAllGraphs(c.Request().Context(), h); err != nil {
+			return err
+		}
 		if err := purgeAllImageCaches(c.Request().Context(), h); err != nil {
 			return err
 		}
