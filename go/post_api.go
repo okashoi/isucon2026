@@ -90,7 +90,7 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 		// 画像の書き込みはウィンドウ行をロックしない。投稿の確定だけ短いトランザクションで行う。
 		imageID := uuid.NewString()
 		imageCreatedAt := time.Now().UTC()
-		if _, err := h.DB.ExecContext(ctx, `INSERT INTO image_objects (id, owner_user_id, data, media_type, created_at) VALUES ($1, $2, $3, 'image/jpeg', $4)`, imageID, userID, imageData, imageCreatedAt); err != nil {
+		if _, err := h.DB.ExecContext(ctx, `INSERT INTO image_objects (id, owner_user_id, data, media_type, created_at) VALUES ($1, $2, $3, 'image/jpeg', $4)`, preparedQuery, imageID, userID, imageData, imageCreatedAt); err != nil {
 			return err
 		}
 		keepImage := false
@@ -98,7 +98,8 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 			if keepImage {
 				return
 			}
-			_, _ = h.DB.ExecContext(context.Background(), `DELETE FROM image_objects WHERE id = $1 AND created_at = $2`, imageID, imageCreatedAt)
+			// INSERT と同じ binary 形式で created_at を渡す。text 形式だとナノ秒が丸められて一致しないことがある。
+			_, _ = h.DB.ExecContext(context.Background(), `DELETE FROM image_objects WHERE id = $1 AND created_at = $2`, preparedQuery, imageID, imageCreatedAt)
 		}()
 
 		tx, err := h.DB.BeginTxx(ctx, nil)
