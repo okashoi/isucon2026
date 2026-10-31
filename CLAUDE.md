@@ -63,7 +63,7 @@ make isubench/check           # 録画した通信を再生して正常版と比
 - 既定の実行モードは `go/config.go` の DSN で指定した simple protocol（動的プレースホルダ）。第1引数に `preparedQuery` を渡したクエリだけ prepared statement で実行する。`bytea` を運ぶクエリと `image_objects` を引くクエリに使う。
 - 2 つのモードでは `time.Time` のエンコードが違う。binary はナノ秒を切り捨て、text は PostgreSQL 側で丸める。Go で作った時刻を一方で書いて、もう一方で完全一致の検索をしない。
 - simple protocol では値が SQL に文字列リテラルとして埋め込まれ、型は PostgreSQL が文脈から決める。文脈で決まらない箇所は `$1::timestamptz` のようにキャストを書く。
-- `maxDBConns` はアプリ 3 台の合計が `max_connections = 100` に収まる値にする。上げるときは s4 の PostgreSQL の設定も合わせて変える。
+- `maxDBConns` はアプリ 3 台の合計が s4 の `max_connections`（`infra/s4/etc/postgresql/16/main/conf.d/isucon.conf`）に収まる値にする。
 - スキーマは `sql/001-schema.sql`。初期化は `sql/reset.sql` が、`initial_data_boundary` より新しい行の削除と `initial_*` テーブルからの復元で行う。テーブルやキャッシュを追加したら `reset.sql` か初期化処理にも反映する。
 
 ### 計測
