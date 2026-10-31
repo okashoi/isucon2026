@@ -23,7 +23,9 @@ func initializeHandler(*HandlerContext) echo.HandlerFunc {
 		cmd := exec.Command("../sql/init.sh")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+		err := cmd.Run()
+		clearImageSignatureCache()
+		if err != nil {
 			return err
 		}
 
