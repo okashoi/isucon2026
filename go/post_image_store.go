@@ -217,10 +217,18 @@ func purgeAllImageCaches(ctx context.Context, h *HandlerContext) error {
 	if err := h.PostImages.Clear(); err != nil {
 		return err
 	}
-	for region, peerURL := range h.Config.PeerURLs {
+	for region, peerURLs := range h.Config.PeerURLs {
 		if region == h.Config.Region {
 			continue
 		}
+		for _, peerURL := range peerURLs {
+			if err := requestPeerPurge(ctx, peerURL+"/internal/image-cache"); err != nil {
+				return err
+			}
+		}
+	}
+	// 同一リージョンの他台の runtime キャッシュも消す。
+	for _, peerURL := range h.Config.PeerURLs[h.Config.Region] {
 		if err := requestPeerPurge(ctx, peerURL+"/internal/image-cache"); err != nil {
 			return err
 		}
