@@ -6,7 +6,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
 )
@@ -57,20 +56,4 @@ func execLocalSync(ctx context.Context, db *sqlx.DB, query string, paramOIDs []u
 		}
 		return nil
 	})
-}
-
-func insertImageObjectLocalSync(ctx context.Context, db *sqlx.DB, id, ownerUserID string, data []byte, createdAt any) error {
-	return execLocalSync(ctx, db,
-		`INSERT INTO image_objects (id, owner_user_id, data, media_type, created_at) VALUES ($1, $2, $3, 'image/jpeg', $4)`,
-		[]uint32{pgtype.TextOID, pgtype.TextOID, pgtype.ByteaOID, pgtype.TimestamptzOID},
-		id, ownerUserID, data, createdAt,
-	)
-}
-
-func deleteImageObjectLocalSync(ctx context.Context, db *sqlx.DB, id string, createdAt any) error {
-	return execLocalSync(ctx, db,
-		`DELETE FROM image_objects WHERE id = $1 AND created_at = $2`,
-		[]uint32{pgtype.TextOID, pgtype.TimestamptzOID},
-		id, createdAt,
-	)
 }

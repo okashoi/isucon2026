@@ -18,6 +18,7 @@ type HandlerContext struct {
 	ReadDB     *sqlx.DB // 読み取り。ISUREAL_DB_READ_HOST 未設定時は DB と同じ
 	Config     *Config
 	IPBans     *IPBanList
+	Abuse      *AbuseDetector
 	Sessions   *SessionCache
 	PostImages *PostImageStore
 }
@@ -53,13 +54,7 @@ func NewServer(config *Config) *echo.Echo {
 		readDB = openDB(config.DatabaseReadDSN())
 	}
 
-	var peers []string
-	for region, peerURL := range config.PeerURLs {
-		if region != config.Region {
-			peers = append(peers, peerURL)
-		}
-	}
-	postImages, err := NewPostImageStore(peers)
+	postImages, err := NewPostImageStore(config.Region, config.PeerURLs)
 	if err != nil {
 		panic("failed to prepare post image directory: " + err.Error())
 	}
@@ -68,17 +63,19 @@ func NewServer(config *Config) *echo.Echo {
 		ReadDB:     readDB,
 		Config:     config,
 		IPBans:     &IPBanList{},
+		Abuse:      NewAbuseDetector(),
 		Sessions:   NewSessionCache(),
 		PostImages: postImages,
 	}
 	e.Use(IPBanMiddleware(handlerContext))
+	e.Use(AbuseBanMiddleware(handlerContext))
 
 	// 他のアプリサーバが :8080 へ直接送る。nginx は /api/ だけを転送するので、ルーターの公開先からは届かない。
 	e.DELETE("/internal/session-cache", purgeAllSessionsHandler(handlerContext))
 	e.DELETE("/internal/session-cache/:userId", purgeUserSessionHandler(handlerContext))
 	e.DELETE("/internal/image-cache", purgeImageCacheHandler(handlerContext))
-	e.PUT("/internal/image-blob/:imageId", putImageBlobHandler(handlerContext))
-	e.GET("/internal/image-blob/:imageId", getImageBlobHandler(handlerContext))
+	e.DELETE("/internal/abuse-state", purgeAbuseStateHandler(handlerContext))
+	e.GET("/internal/images/:imageId", getOriginImageHandler(handlerContext))
 	// make post-images/sync が asia1 へ送る。
 	e.POST("/internal/post-image-cache", fillPostImageCacheHandler(handlerContext))
 

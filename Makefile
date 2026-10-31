@@ -118,6 +118,17 @@ replica/status:
 	ssh $(DB_HOST) "sudo -u postgres psql -c \"SELECT application_name, client_addr, state, sync_state, replay_lag FROM pg_stat_replication ORDER BY 1;\" -c \"SELECT slot_name, active, restart_lsn FROM pg_replication_slots;\""
 	$(foreach h,$(STANDBY_DB_HOSTS),ssh $(h) "echo '--- $(h) ---'; sudo -u postgres psql -c \"SELECT pg_is_in_recovery(); SELECT status, slot_name, sender_host FROM pg_stat_wal_receiver;\" 2>&1 || echo 'pg down';")
 
+# 攻撃の検知はアプリが行うので isureal-guard は使わない。guard/off はサーバの再起動後も効く。
+# guard はアクションログを読むので、guard/on のあと BAN を書かせるには ISUREAL_LOG_LEVEL を info 以下にする。
+guard/off:
+	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo systemctl disable --now isureal-guard";)
+
+guard/on:
+	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo systemctl enable --now isureal-guard";)
+
+guard/status:
+	$(foreach h,$(APP_HOSTS),ssh $(h) "echo '--- $(h) ---'; systemctl is-enabled isureal-guard; systemctl is-active isureal-guard || true";)
+
 # 録画・再生で変更を20秒前後で確かめる (.agents/skills/isubench/SKILL.md)
 isubench/%:
 	./mybin/isubench/isubench.sh $*

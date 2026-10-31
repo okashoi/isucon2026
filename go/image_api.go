@@ -44,12 +44,13 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		// 削除状態を毎回確認する。即時反映も5秒以内の許容範囲に含まれる。
 		// バイト列はローカルから返すので、DB からは鍵と取得の可否だけを 1 往復で引く。
 		var object struct {
-			SecretKeyHash string `db:"secret_key_hash"`
-			MediaType     string `db:"media_type"`
-			Visible       bool   `db:"visible"`
+			SecretKeyHash string  `db:"secret_key_hash"`
+			MediaType     string  `db:"media_type"`
+			OriginRegion  *string `db:"origin_region"`
+			Visible       bool    `db:"visible"`
 		}
 		err = h.ReadDB.GetContext(ctx, &object, `
-   SELECT u.secret_key_hash, i.media_type, (
+   SELECT u.secret_key_hash, i.media_type, i.origin_region, (
      COALESCE(u.profile_image_id = i.id, false)
      OR EXISTS (
        SELECT 1 FROM posts p
@@ -84,7 +85,7 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 
 		// 署名を確かめてから読むので、不正な署名ではバイト列を DB から運ばない。
-		data, err := h.PostImages.Load(ctx, h.ReadDB, input.ImageID)
+		data, err := h.PostImages.Load(ctx, h.ReadDB, input.ImageID, object.OriginRegion)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}
