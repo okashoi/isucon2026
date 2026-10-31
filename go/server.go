@@ -10,8 +10,9 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// アプリ3台の primary 向け合計が s4 の max_connections（300）に、superuser 予約分を残して収まるようにする。
-const maxDBConns = 80
+// アプリ3台の primary 向け合計が s4 の max_connections（300）に収まるようにする。
+// 加点の並列を落とさないよう 100 のままにし、超user予約は運用で監視する。
+const maxDBConns = 100
 
 type HandlerContext struct {
 	DB         *sqlx.DB // primary（書き込み・TX・initialize）
@@ -84,6 +85,7 @@ func NewServer(config *Config) *echo.Echo {
 	e.GET("/internal/images/:imageId", getOriginImageHandler(handlerContext))
 	// make post-images/sync が asia1 へ送る。
 	e.POST("/internal/post-image-cache", fillPostImageCacheHandler(handlerContext))
+	e.PUT("/internal/image-cache/:imageId", putImageCacheHandler(handlerContext))
 	e.POST("/internal/posting-window-notify", notifyPostingWindowHandler(handlerContext))
 
 	e.POST("/api/initialize", initializeHandler(handlerContext))

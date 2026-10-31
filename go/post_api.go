@@ -103,6 +103,7 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
+		h.PostImages.ReplicateToPeers(ctx, imageID, imageData)
 		if err := post.Author.setImageKey(); err != nil {
 			return err
 		}

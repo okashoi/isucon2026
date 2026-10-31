@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	ipBanReloadInterval = 200 * time.Millisecond
+	ipBanReloadInterval = 2 * time.Second
 	ipBanDuration       = 2 * time.Minute
 	ipBanWriteTimeout   = 5 * time.Second
 )

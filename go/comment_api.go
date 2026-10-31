@@ -61,11 +61,11 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
 		id := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id,post_id,author_id,body,created_at) VALUES($1,$2,$3,$4,clock_timestamp())`, id, post.ID, actor, input.Body); err != nil {
-			return err
-		}
-		comment, err := getComment(ctx, tx, id)
-		if err != nil {
+		var comment Comment
+		if err := tx.GetContext(ctx, &comment, `
+   INSERT INTO comments(id,post_id,author_id,body,created_at)
+   VALUES($1,$2,$3,$4,clock_timestamp())
+   RETURNING id, post_id, author_id, body, created_at, deleted_at`, id, post.ID, actor, input.Body); err != nil {
 			return err
 		}
 		user, err := getUser(ctx, tx, actor)

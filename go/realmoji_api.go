@@ -114,6 +114,7 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		keepImage = true
+		h.PostImages.ReplicateToPeers(ctx, imageID, data)
 		return c.JSON(http.StatusCreated, newRealMojiResponse(reaction, user))
 	}
 }

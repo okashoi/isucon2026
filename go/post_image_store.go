@@ -1,6 +1,7 @@
 package isureal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -123,6 +124,26 @@ func (s *PostImageStore) SaveOrigin(id string, data []byte) error {
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+// ReplicateToPeers は加点の画像 GET が origin へ WAN しに行かないよう、他リージョンへ先に置く。
+// 失敗しても origin 取得に落ちるので、呼び出し側はエラーを無視してよい。
+func (s *PostImageStore) ReplicateToPeers(ctx context.Context, id string, data []byte) {
+	for region, peerURL := range s.peerURLs {
+		if region == s.region || peerURL == "" {
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, peerURL+"/internal/image-cache/"+url.PathEscape(id), bytes.NewReader(data))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "image/jpeg")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+	}
 }
 
 // Remove は投稿が確定しなかった画像を消す。
@@ -361,6 +382,23 @@ func getOriginImageHandler(h *HandlerContext) echo.HandlerFunc {
 func fillPostImageCacheHandler(h *HandlerContext) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		if err := h.PostImages.FillMissing(c.Request().Context(), h.DB); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	}
+}
+
+func putImageCacheHandler(h *HandlerContext) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		id := c.Param("imageId")
+		if !validImageFileID(id) {
+			return NewAPIError(http.StatusBadRequest, "invalid_image")
+		}
+		data, err := io.ReadAll(c.Request().Body)
+		if err != nil {
+			return err
+		}
+		if err := h.PostImages.Save(id, data); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)

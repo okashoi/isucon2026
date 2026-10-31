@@ -67,7 +67,8 @@ CREATE INDEX IF NOT EXISTS follows_followee_id ON follows(followee_id);
 -- VOLATILE なので文ごとにスナップショットを取り直し、advisory lock を待ったあとの文は最新の関係を読む。
 -- p_pair_key は Go の userPairAdvisoryKey の値で、lockUserPair と同じペアを直列化する。
 -- result は ok / not_found / conflict で、ok のときだけ relation_* が入る。
--- 申請と承認はリージョン跨ぎの即時可視が必要。remote_apply を待つ。
+-- 申請と承認は見えるものを増やすだけなので、standby の反映を待たずに commit する。
+-- 一覧は Primary を読む（go/relationship_list_api.go）。友達集合は GraphCache を捨ててから返す。
 CREATE OR REPLACE FUNCTION create_friend_request(
   p_actor text,
   p_target text,
@@ -82,6 +83,7 @@ DECLARE
   v_pending_id text;
   v_pending_requester_id text;
 BEGIN
+  PERFORM set_config('synchronous_commit', 'local', true);
   PERFORM pg_advisory_xact_lock(p_pair_key);
 
   SELECT count(*) INTO v_active_users FROM (

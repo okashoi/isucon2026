@@ -67,6 +67,7 @@ func putProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		keepImage = true
+		h.PostImages.ReplicateToPeers(ctx, imageID, data)
 		return c.NoContent(http.StatusNoContent)
 	}
 }
