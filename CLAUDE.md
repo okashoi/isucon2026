@@ -20,7 +20,7 @@ cd mybin/isubench && go test ./...          # isubench のテスト
 cd mybin/isubench && go test -run TestNumericIDs ./...   # 単体で実行
 ```
 
-`go/` に既存のテストはない。追加するときは公開 HTTP API を通す特性テストにする（方針は `AGENTS.md` の Agent Instructions）。
+`go/` のテストを追加するときは公開 HTTP API を通す特性テストにする（方針は `AGENTS.md` の Agent Instructions）。DB を使うテストは `ISUREAL_TEST_DB_HOST` を指定したときだけ動き、`sql/001-schema.sql` と `sql/003-initial-snapshot.sql` を適用した DB と psql が要る。
 
 次は競技サーバー上で実行する。
 
