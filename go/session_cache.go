@@ -29,6 +29,32 @@ func NewSessionCache() *SessionCache {
 	return &SessionCache{sessions: map[string]Session{}, tokenHashByUserID: map[string]string{}}
 }
 
+func (c *SessionCache) Get(tokenHash string) (*Session, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	session, ok := c.sessions[tokenHash]
+	return &session, ok
+}
+
+// Generation は DB からセッションを読む前に取得して Add に渡す。
+func (c *SessionCache) Generation() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.generation
+}
+
+// Add は generation の取得後に破棄があったら保存しない。DB から読んだ値が破棄より前のものかもしれないため。
+func (c *SessionCache) Add(generation uint64, session Session) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.generation != generation {
+		return
+	}
+	delete(c.sessions, c.tokenHashByUserID[session.UserID])
+	c.sessions[session.TokenHash] = session
+	c.tokenHashByUserID[session.UserID] = session.TokenHash
+}
+
 func (c *SessionCache) PurgeUser(userID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
