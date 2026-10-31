@@ -120,7 +120,9 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 			LocalDate time.Time `db:"local_date"`
 			StartsAt  time.Time `db:"starts_at"`
 		}
-		err = tx.GetContext(ctx, &window, `SELECT id, local_date, starts_at FROM posting_windows WHERE region = $1 AND ended_at IS NULL FOR UPDATE`, user.Region)
+		// 投稿枠は上の users 行ロックでユーザー単位に直列化する。
+		// ウィンドウ行は FOR SHARE にし、別ユーザーの投稿を並ばせない。期間終了の UPDATE とは衝突する。
+		err = tx.GetContext(ctx, &window, `SELECT id, local_date, starts_at FROM posting_windows WHERE region = $1 AND ended_at IS NULL FOR SHARE`, user.Region)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return NewAPIError(http.StatusConflict, "post_slot_unavailable")
