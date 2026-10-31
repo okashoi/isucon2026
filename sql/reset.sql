@@ -46,5 +46,11 @@ CREATE INDEX IF NOT EXISTS friendships_user_high_id ON friendships(user_high_id)
 CREATE INDEX IF NOT EXISTS users_region_status ON users(region, status);
 CREATE INDEX IF NOT EXISTS users_status_username_id ON users(status, username, id);
 CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users (username);
+CREATE INDEX IF NOT EXISTS friend_requests_pending_pair ON friend_requests(requester_id, recipient_id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS friend_requests_pending_recipient ON friend_requests(recipient_id, requester_id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS login_sessions_token_hash ON login_sessions(token_hash) WHERE active;
+CREATE INDEX IF NOT EXISTS login_sessions_user_id ON login_sessions(user_id) WHERE active;
+CREATE INDEX IF NOT EXISTS block_relations_blocked_id ON block_relations(blocked_id);
+CREATE INDEX IF NOT EXISTS follows_followee_id ON follows(followee_id);
 
 COMMIT;
