@@ -8,8 +8,6 @@ README と `AGENTS.md` の一部は別の問題を想定したテンプレート
 
 ## 守ること
 
-- 作業前に [go/AGENTS.md](go/AGENTS.md) を読む。競技サーバーは本番として扱い、サーバー上では読み取りだけを行う。変更はブランチと PR を通し、デプロイは人間が行う。
-- データ耐久性や可用性を下げる変更は提案もしない。[docs/doc-idea.md](docs/doc-idea.md) の `synchronous_commit = off` の案も対象で、go/AGENTS.md を優先する。
 - サーバーのリージョン、ルーター経由の通信、`isucon-register.service` は維持する。競技の仕様は [docs/contest/manual.md](docs/contest/manual.md) と [docs/contest/regulation.md](docs/contest/regulation.md) を正とする。特に「データの反映」節の整合性要件は、リージョンをまたぐ読み取りにも適用される。
 - 応答は日本語で書く。
 
@@ -24,7 +22,7 @@ cd mybin/isubench && go test -run TestNumericIDs ./...   # 単体で実行
 
 `go/` に既存のテストはない。追加するときは公開 HTTP API を通す特性テストにする（方針は `AGENTS.md` の Agent Instructions）。
 
-次は競技サーバー上で人間が実行する。
+次は競技サーバー上で実行する。
 
 ```sh
 make gogo                     # 全サービス停止、ビルド、ログ消去、起動
