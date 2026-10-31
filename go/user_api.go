@@ -94,8 +94,8 @@ func registerHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		userID := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO users (id, username, secret_key_hash, display_name, region) VALUES ($1, $2, $3, $4, $5)`,
-			userID, input.Username, hex.EncodeToString(hash[:]), input.DisplayName, input.Region); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO users (id, username, secret_key_hash, display_name, region, username_norm, display_name_norm) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			userID, input.Username, hex.EncodeToString(hash[:]), input.DisplayName, input.Region, normalizeSearchText(input.Username), normalizeSearchText(input.DisplayName)); err != nil {
 			if isUniqueViolation(err) {
 				return NewAPIError(http.StatusConflict, "username_taken")
 			}
@@ -225,7 +225,7 @@ func updateMeHandler(h *HandlerContext) echo.HandlerFunc {
 			}
 		}
 		if input.DisplayName != nil {
-			if _, err := tx.ExecContext(ctx, `UPDATE users SET display_name = $2, updated_at = clock_timestamp() WHERE id = $1`, session.UserID, *input.DisplayName); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE users SET display_name = $2, display_name_norm = $3, updated_at = clock_timestamp() WHERE id = $1`, session.UserID, *input.DisplayName, normalizeSearchText(*input.DisplayName)); err != nil {
 				return err
 			}
 		}
