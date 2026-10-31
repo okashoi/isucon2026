@@ -92,7 +92,7 @@ sudo -u postgres env PGPASSWORD='${REPLICATOR_PASSWORD}' pg_basebackup \\
   -d "application_name=${NAME}"
 sudo tee /etc/postgresql/16/main/conf.d/isucon.conf >/dev/null <<CONF
 listen_addresses = '*'
-max_connections = 300
+max_connections = 600
 hot_standby = on
 CONF
 sudo systemctl enable postgresql >/dev/null 2>&1 || true

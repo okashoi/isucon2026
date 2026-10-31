@@ -10,8 +10,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// アプリ3台の primary 向け合計が s4 の max_connections（300）に収まるようにする。
-const maxDBConns = 100
+// アプリ3台の primary 向け合計が s4 の max_connections（600）に収まるようにする。
+const maxDBConns = 200
 
 type HandlerContext struct {
 	DB         *sqlx.DB // primary（書き込み・TX・initialize）
