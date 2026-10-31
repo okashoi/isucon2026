@@ -1,7 +1,6 @@
 package isureal
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"io"
@@ -82,32 +81,28 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
-		// 画像の書き込みはウィンドウ行をロックしない。投稿の確定だけ create_post の 1 文で行う。
-		// 画像 INSERT だけ synchronous_commit=local。投稿の remote_apply コミット時点で画像 WAL も適用済み。
+		// 画像のバイト列は DB に書かず、このサーバのローカルにだけ置く。ファイルの書き込みはウィンドウ行をロックしない。
+		// 他のサーバはコミット後に画像の行を見てここへ取りに来るので、コミットより先に置く。
 		imageID := uuid.NewString()
-		imageCreatedAt := time.Now().UTC()
-		if err := insertImageObjectLocalSync(ctx, h.DB, imageID, userID, imageData, imageCreatedAt); err != nil {
+		if err := h.PostImages.SaveOrigin(imageID, imageData); err != nil {
 			return err
 		}
 		keepImage := false
 		defer func() {
-			if keepImage {
-				return
+			if !keepImage {
+				h.PostImages.Remove(imageID)
 			}
-			// INSERT と同じ binary 形式で created_at を渡す。text 形式だとナノ秒が丸められて一致しないことがある。
-			_ = deleteImageObjectLocalSync(context.Background(), h.DB, imageID, imageCreatedAt)
 		}()
 
-		post, err := createPost(ctx, h.DB, userID, imageID, input.Caption, input.Visibility, location)
+		post, err := createPost(ctx, h.DB, userID, imageID, h.Config.Region, input.Caption, input.Visibility, location)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusConflict, "post_slot_unavailable")
 		}
+		// ほかの失敗は確定したかどうか分からないので、ここからは画像を消さない。
+		keepImage = true
 		if err != nil {
 			return err
 		}
-		keepImage = true
-		// 失敗しても投稿は確定している。取得とエクスポートはファイルが無い画像だけ DB から取る。
-		_ = h.PostImages.Save(imageID, imageData)
 		if err := post.Author.setImageKey(); err != nil {
 			return err
 		}

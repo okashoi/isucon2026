@@ -3,7 +3,10 @@ package isureal
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,15 +18,20 @@ import (
 // 画像の JPEG をアプリサーバーのローカルに置く。
 // 画像の取得とエクスポートは、バイト列をリクエストのたびに DB から運ばない。
 // 画像は ID ごとに中身が変わらないので、取得の可否だけを DB で確認すればよい。
+//
+// 実行中に投稿した画像は DB にバイト列を書かず、書き込んだサーバのローカルにだけ置く（image_objects.origin_region）。
+// 同期レプリケーションで画像を WAN 越しに運ばないため。他のサーバはファイルが無ければ書き込んだサーバから取る。
 type PostImageStore struct {
 	// make post-images/sync が配る初期データの画像。初期化では消さない。
 	dir string
-	// 実行中に書き込んだ画像と、DB から読んだ画像。初期化で消す。
+	// 実行中に書き込んだ画像と、DB や他のサーバから読んだ画像。初期化で消す。
 	runtimeDir string
 	mu         sync.Mutex
+	region     string
+	peerURLs   map[string]string
 }
 
-func NewPostImageStore() (*PostImageStore, error) {
+func NewPostImageStore(region string, peerURLs map[string]string) (*PostImageStore, error) {
 	dir := os.Getenv("ISUREAL_POST_IMAGE_DIR")
 	if dir == "" {
 		// 作業ディレクトリは go/ なので webapp/post-images になる。make post-images/sync もここへ配る。
@@ -38,7 +46,7 @@ func NewPostImageStore() (*PostImageStore, error) {
 			return nil, err
 		}
 	}
-	return &PostImageStore{dir: dir, runtimeDir: runtimeDir}, nil
+	return &PostImageStore{dir: dir, runtimeDir: runtimeDir, region: region, peerURLs: peerURLs}, nil
 }
 
 func imageFilePath(dir, id string) (string, error) {
@@ -81,6 +89,51 @@ func (s *PostImageStore) Save(id string, data []byte) error {
 	return save(s.runtimeDir, id, data)
 }
 
+// SaveOrigin は DB にバイト列を書かない画像を置く。この置き場所が唯一の実体なので、
+// 再起動後も残るように fsync してから返す。
+func (s *PostImageStore) SaveOrigin(id string, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path, err := imageFilePath(s.runtimeDir, id)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	d, err := os.Open(s.runtimeDir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
+
+// Remove は投稿が確定しなかった画像を消す。
+func (s *PostImageStore) Remove(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if path, err := imageFilePath(s.runtimeDir, id); err == nil {
+		_ = os.Remove(path)
+	}
+}
+
 func save(dir, id string, data []byte) error {
 	path, err := imageFilePath(dir, id)
 	if err != nil {
@@ -103,9 +156,9 @@ func (s *PostImageStore) Clear() error {
 	return os.MkdirAll(s.runtimeDir, 0o755)
 }
 
-// Load は画像のバイト列をローカルから返す。無ければ DB から読んで置く。
-// 画像の行が無ければ sql.ErrNoRows を返す。取得してよいかは呼び出し側が確認する。
-func (s *PostImageStore) Load(ctx context.Context, db sqlx.QueryerContext, id string) ([]byte, error) {
+// Load は画像のバイト列をローカルから返す。無ければ、origin があればそのサーバから、無ければ DB から読んで置く。
+// origin は image_objects.origin_region。画像の行が無ければ sql.ErrNoRows を返す。取得してよいかは呼び出し側が確認する。
+func (s *PostImageStore) Load(ctx context.Context, db sqlx.QueryerContext, id string, origin *string) ([]byte, error) {
 	data, err := s.Read(id)
 	if err == nil {
 		return data, nil
@@ -113,12 +166,37 @@ func (s *PostImageStore) Load(ctx context.Context, db sqlx.QueryerContext, id st
 	if !errors.Is(err, os.ErrNotExist) && validImageFileID(id) {
 		return nil, err
 	}
-	if err := sqlx.GetContext(ctx, db, &data, `SELECT data FROM image_objects WHERE id = $1`, preparedQuery, id); err != nil {
+	if origin != nil {
+		if data, err = s.fetchFromOrigin(ctx, *origin, id); err != nil {
+			return nil, err
+		}
+	} else if err := sqlx.GetContext(ctx, db, &data, `SELECT data FROM image_objects WHERE id = $1`, preparedQuery, id); err != nil {
 		return nil, err
 	}
-	// 置けなくても次の取得で DB から読み直す。
+	// 置けなくても次の取得で読み直す。
 	_ = s.Save(id, data)
 	return data, nil
+}
+
+// fetchFromOrigin は画像を書き込んだサーバのローカルから取る。
+func (s *PostImageStore) fetchFromOrigin(ctx context.Context, region, id string) ([]byte, error) {
+	peerURL, ok := s.peerURLs[region]
+	if !ok || region == s.region {
+		return nil, fmt.Errorf("post image %s is missing on its origin %q", id, region)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, peerURL+"/internal/images/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := peerClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch post image from %s: %w", region, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch post image %s from %s: %s", id, region, res.Status)
+	}
+	return io.ReadAll(res.Body)
 }
 
 // FillMissing は初期データの画像のうち、ファイルが無いものだけを DB から書き出す。
@@ -182,12 +260,15 @@ func (s *PostImageStore) Bytes(ctx context.Context, db *sqlx.DB, ids []string) (
 }
 
 // loadFromDB は ids の画像を DB から読んで dir に置く。out が nil でなければ中身も入れる。
+// DB にバイト列が無い画像（origin_region がある行）は、書き込んだサーバから取る。
 func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []string, dir string, out map[string][]byte) error {
-	query, args, err := sqlx.In(`SELECT id, data FROM image_objects WHERE id IN (?)`, ids)
+	query, args, err := sqlx.In(`SELECT id, data, origin_region FROM image_objects WHERE id IN (?)`, ids)
 	if err != nil {
 		return err
 	}
 	query = sqlx.Rebind(sqlx.DOLLAR, query)
+	type remoteImage struct{ id, origin string }
+	var remote []remoteImage
 	rows, err := db.QueryxContext(ctx, query, append([]any{preparedQuery}, args...)...)
 	if err != nil {
 		return err
@@ -196,20 +277,46 @@ func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []stri
 	for rows.Next() {
 		var id string
 		var data []byte
-		if err := rows.Scan(&id, &data); err != nil {
+		var origin *string
+		if err := rows.Scan(&id, &data, &origin); err != nil {
 			return err
 		}
-		s.mu.Lock()
-		err := save(dir, id, data)
-		s.mu.Unlock()
+		if origin != nil {
+			remote = append(remote, remoteImage{id: id, origin: *origin})
+			continue
+		}
+		if err := s.store(dir, id, data, out); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// 他のサーバへの往復のあいだ DB の接続を持たないように、行を読み終えてから取る。
+	rows.Close()
+	for _, image := range remote {
+		data, err := s.fetchFromOrigin(ctx, image.origin, image.id)
 		if err != nil {
 			return err
 		}
-		if out != nil {
-			out[id] = data
+		if err := s.store(dir, image.id, data, out); err != nil {
+			return err
 		}
 	}
-	return rows.Err()
+	return nil
+}
+
+func (s *PostImageStore) store(dir, id string, data []byte, out map[string][]byte) error {
+	s.mu.Lock()
+	err := save(dir, id, data)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if out != nil {
+		out[id] = data
+	}
+	return nil
 }
 
 // purgeAllImageCaches は全リージョンのサーバで、実行中に置いた画像を消す。
@@ -234,6 +341,20 @@ func purgeImageCacheHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)
+	}
+}
+
+// getOriginImageHandler は、このサーバで書き込んだ画像を他のサーバへ返す。取得の可否は取りに来たサーバが確認済み。
+func getOriginImageHandler(h *HandlerContext) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		data, err := h.PostImages.Read(c.Param("imageId"))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || !validImageFileID(c.Param("imageId")) {
+				return c.NoContent(http.StatusNotFound)
+			}
+			return err
+		}
+		return c.Blob(http.StatusOK, "image/jpeg", data)
 	}
 }
 
