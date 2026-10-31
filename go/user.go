@@ -2,11 +2,15 @@ package isureal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -41,6 +45,8 @@ func validRegion(region string) bool {
 
 var userColumns = []string{"id", "username", "secret_key_hash", "display_name", "bio", "profile_image_id", "region", "account_type", "status"}
 
+var userColumnList = strings.Join(userColumns, ", ")
+
 func userColumnsAs(alias, prefix string) string {
 	columns := make([]string, len(userColumns))
 	for i, column := range userColumns {
@@ -55,20 +61,55 @@ func (user *User) setImageKey() error {
 	return err
 }
 
-var activeUserQuery = `SELECT ` + strings.Join(userColumns, ", ") + ` FROM users WHERE id = $1 AND status = 'active'`
-
 func getUser(ctx context.Context, db sqlx.QueryerContext, userID string) (User, error) {
-	return queryUser(ctx, db, activeUserQuery, userID)
-}
-
-func lockUser(ctx context.Context, tx *sqlx.Tx, userID string) (User, error) {
-	return queryUser(ctx, tx, activeUserQuery+` FOR NO KEY UPDATE`, userID)
-}
-
-func queryUser(ctx context.Context, db sqlx.QueryerContext, query, userID string) (User, error) {
 	var user User
-	if err := sqlx.GetContext(ctx, db, &user, query, userID); err != nil {
+	if err := sqlx.GetContext(ctx, db, &user, `SELECT `+userColumnList+` FROM users WHERE id = $1 AND status = 'active'`, userID); err != nil {
 		return user, err
 	}
 	return user, user.setImageKey()
+}
+
+// registerUser のユーザー名の一意性は UNIQUE 制約が持つ。
+func registerUser(ctx context.Context, db sqlx.QueryerContext, username, secretKey, displayName, region string) (User, error) {
+	secretKeyHash := sha256.Sum256([]byte(secretKey))
+	var user User
+	err := sqlx.GetContext(ctx, db, &user, `INSERT INTO users (id, username, secret_key_hash, display_name, region, username_norm, display_name_norm) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING `+userColumnList,
+		uuid.NewString(), username, hex.EncodeToString(secretKeyHash[:]), displayName, region, normalizeSearchText(username), normalizeSearchText(displayName))
+	return user, err
+}
+
+// 初期データの username_norm / display_name_norm を normalizeSearchText で埋める。
+// PostgreSQL の lower() は Go の cases.Fold + NFC と一致しないので SQL では生成できない。
+// initial_users に埋めるのは初回だけで、以降の reset.sql はそこから users へ復元する。
+func backfillUserSearchNorms(ctx context.Context, db *sqlx.DB) error {
+	var rows []struct {
+		ID          string `db:"id"`
+		Username    string `db:"username"`
+		DisplayName string `db:"display_name"`
+	}
+	if err := db.SelectContext(ctx, &rows, `SELECT id, username, display_name FROM initial_users WHERE username_norm IS NULL`); err != nil {
+		return err
+	}
+	for chunk := range slices.Chunk(rows, 5000) {
+		ids := make([]string, len(chunk))
+		usernames := make([]string, len(chunk))
+		displayNames := make([]string, len(chunk))
+		for i, row := range chunk {
+			ids[i] = row.ID
+			usernames[i] = normalizeSearchText(row.Username)
+			displayNames[i] = normalizeSearchText(row.DisplayName)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE initial_users i
+			SET username_norm = v.username_norm, display_name_norm = v.display_name_norm
+			FROM (SELECT unnest($1::text[]) AS id, unnest($2::text[]) AS username_norm, unnest($3::text[]) AS display_name_norm) v
+			WHERE i.id = v.id`, preparedQuery, ids, usernames, displayNames); err != nil {
+			return err
+		}
+	}
+	_, err := db.ExecContext(ctx, `UPDATE users u
+		SET username_norm = i.username_norm, display_name_norm = i.display_name_norm
+		FROM initial_users i
+		WHERE u.id = i.id
+		  AND (u.username_norm, u.display_name_norm) IS DISTINCT FROM (i.username_norm, i.display_name_norm)`)
+	return err
 }

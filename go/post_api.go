@@ -1,7 +1,6 @@
 package isureal
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"io"
@@ -82,80 +81,32 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
-		// 画像の書き込みはウィンドウ行をロックしない。投稿の確定だけ短いトランザクションで行う。
+		// 画像のバイト列は DB に書かず、このサーバのローカルにだけ置く。ファイルの書き込みはウィンドウ行をロックしない。
+		// 他のサーバはコミット後に画像の行を見てここへ取りに来るので、コミットより先に置く。
 		imageID := uuid.NewString()
-		imageCreatedAt := time.Now().UTC()
-		if _, err := h.DB.ExecContext(ctx, `INSERT INTO image_objects (id, owner_user_id, data, media_type, created_at) VALUES ($1, $2, $3, 'image/jpeg', $4)`, preparedQuery, imageID, userID, imageData, imageCreatedAt); err != nil {
+		if err := h.PostImages.SaveOrigin(imageID, imageData); err != nil {
 			return err
 		}
 		keepImage := false
 		defer func() {
-			if keepImage {
-				return
+			if !keepImage {
+				h.PostImages.Remove(imageID)
 			}
-			// INSERT と同じ binary 形式で created_at を渡す。text 形式だとナノ秒が丸められて一致しないことがある。
-			_, _ = h.DB.ExecContext(context.Background(), `DELETE FROM image_objects WHERE id = $1 AND created_at = $2`, preparedQuery, imageID, imageCreatedAt)
 		}()
 
-		tx, err := h.DB.BeginTxx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		user, err := lockUser(ctx, tx, userID)
-		if err != nil {
-			return err
-		}
-		var window struct {
-			ID           string    `db:"id"`
-			StartsAt     time.Time `db:"starts_at"`
-			ActivePosts  int       `db:"active_posts"`
-			DeletedPosts int       `db:"deleted_posts"`
-		}
-		// 投稿枠は上の users 行ロックでユーザー単位に直列化する。件数は行ロックを待ったあとのスナップショットで数える必要があるので、別の文にする。
-		// ウィンドウ行は FOR SHARE にし、別ユーザーの投稿を並ばせない。期間終了の UPDATE とは衝突する。
-		err = tx.GetContext(ctx, &window, `
-   SELECT w.id, w.starts_at, c.active_posts, c.deleted_posts
-   FROM posting_windows w CROSS JOIN LATERAL (
-     SELECT count(*) FILTER (WHERE p.deleted_at IS NULL) AS active_posts,
-            count(*) FILTER (WHERE p.deleted_at IS NOT NULL) AS deleted_posts
-     FROM posts p JOIN posting_windows pw ON pw.id = p.posting_window_id
-     WHERE p.author_id = $2 AND pw.local_date = w.local_date
-   ) c
-   WHERE w.region = $1 AND w.ended_at IS NULL
-   FOR SHARE OF w
-  `, user.Region, userID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return NewAPIError(http.StatusConflict, "post_slot_unavailable")
-			}
-			return err
-		}
-		postedAt := time.Now().UTC()
-		if window.ActivePosts != 0 || window.DeletedPosts >= 2 || postedAt.Before(window.StartsAt) {
+		post, err := createPost(ctx, h.DB, userID, imageID, h.Config.Region, input.Caption, input.Visibility, location)
+		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusConflict, "post_slot_unavailable")
 		}
-		var post Post
-		if err := tx.GetContext(ctx, &post, `
-   WITH p AS (
-     INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility,
-                        location_kind, latitude, longitude, locality, posted_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-     RETURNING *
-   )
-   SELECT `+postColumns+`
-   FROM p JOIN posting_windows w ON w.id = p.posting_window_id
-  `, uuid.NewString(), userID, window.ID, imageID, input.Caption, input.Visibility,
-			location.Kind, location.Latitude, location.Longitude, location.Locality, postedAt); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
+		// ほかの失敗は確定したかどうか分からないので、ここからは画像を消さない。
 		keepImage = true
-		// 失敗しても投稿は確定している。取得とエクスポートはファイルが無い画像だけ DB から取る。
-		_ = h.PostImages.Save(imageID, imageData)
-		return c.JSON(http.StatusCreated, newPostResponse(post, user))
+		if err != nil {
+			return err
+		}
+		if err := post.Author.setImageKey(); err != nil {
+			return err
+		}
+		return c.JSON(http.StatusCreated, newPostResponse(post.Post, post.Author))
 	}
 }
 
@@ -236,6 +187,11 @@ func getPostHandler(h *HandlerContext) echo.HandlerFunc {
 		viewer, err := loadViewerContext(ctx, h.ReadDB, GetSession(c).UserID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+		if err == nil {
+			if err := viewer.prepareCanView(ctx, h.ReadDB, post.Post); err != nil {
+				return err
+			}
 		}
 		if err != nil || !viewer.canView(post.Post) {
 			return NewAPIError(http.StatusNotFound, "post_not_found")

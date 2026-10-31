@@ -86,48 +86,21 @@ func SessionMiddleware(handlerContext *HandlerContext, authRequired bool) echo.M
 
 // InvalidateLoginSession は users 行のロックの下で読んだ所属リージョンを返す。
 func InvalidateLoginSession(db *sqlx.DB, userID string, tokenHash string) (string, error) {
-	tx, err := db.Beginx()
-	if err != nil {
-		return "", fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
 	var region string
-	if err := tx.Get(&region, `SELECT region FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
-		return "", fmt.Errorf("failed to lock user: %w", err)
-	}
-
-	if _, err := tx.Exec(`
-		UPDATE login_sessions
-		SET active = false, invalidated_at = clock_timestamp(), reason = 'logout'
-		WHERE user_id = $1 AND active = true AND token_hash = $2
-	`, userID, tokenHash); err != nil {
+	if err := db.Get(&region, `SELECT logout_user($1, $2)`, userID, tokenHash); err != nil {
 		return "", fmt.Errorf("failed to invalidate sessions: %w", err)
 	}
-
-	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
 	return region, nil
 }
 
-// replaceLoginSession は有効なセッションを新しいものに置き換えてトークンを返す。
-// 有効なセッションが複数残らないよう、呼び出し元が users 行をロックしておく。
-func replaceLoginSession(ctx context.Context, tx *sqlx.Tx, userID string) (string, error) {
+// loginUser は認証に成功したら、有効なセッションを新しいものに置き換えてトークンを返す。
+// 認証に失敗したら sql.ErrNoRows を返す。
+func loginUser(ctx context.Context, db sqlx.QueryerContext, username, secretKey string) (User, string, error) {
+	secretKeyHash := sha256.Sum256([]byte(secretKey))
 	token := uuid.NewString()
-	tokenHashBytes := sha256.Sum256([]byte(token))
-	tokenHash := hex.EncodeToString(tokenHashBytes[:])
-	if _, err := tx.ExecContext(ctx, `
-  WITH replaced AS (
-    UPDATE login_sessions
-    SET active = false, invalidated_at = clock_timestamp(), reason = 'replaced'
-    WHERE user_id = $1 AND active = true
-  )
-  INSERT INTO login_sessions (id, user_id, token_hash)
-  VALUES ($2, $1, $3)
- `, userID, uuid.NewString(), tokenHash); err != nil {
-		return "", fmt.Errorf("failed to replace session: %w", err)
-	}
-	return token, nil
+	tokenHash := sha256.Sum256([]byte(token))
+	var user User
+	err := sqlx.GetContext(ctx, db, &user, `SELECT `+userColumnList+` FROM login_user($1, $2, $3)`,
+		username, hex.EncodeToString(secretKeyHash[:]), hex.EncodeToString(tokenHash[:]))
+	return user, token, err
 }

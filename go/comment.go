@@ -60,6 +60,9 @@ func canComment(ctx context.Context, db sqlx.QueryerContext, viewerID, postID st
 	if err != nil {
 		return false, err
 	}
+	if err := viewer.prepareCanView(ctx, db, post.Post); err != nil {
+		return false, err
+	}
 	if !viewer.canView(post.Post) || post.WindowEndedAt != nil {
 		return false, nil
 	}

@@ -7,6 +7,12 @@
 #   make deploy   # ビルド → 各 APP_HOSTS へ rsync → systemctl restart（PG は触らない。チーム作業向き）
 #   make gogo     # 全 APP 停止 → スタンバイ/primary 停止 → ビルド → 配布 → ログ消去 → PG/APP/nginx 起動
 #                 # stop-the-world。チームのベンチと被せないこと。
+#   make replica/ensure               # streaming / 同期 / READ_HOST を冪等にそろえる
+#   make replica/basebackup/europe1   # 未構築時のみ basebackup（FORCE=1 で取り直し）
+#   make replica/basebackup/america1
+#   make replica/sync/on|off|status
+#   make replica/read-host/on|off|status
+#   make replica/status
 #
 APPNAME := isureal-go.service
 APP_BIN := go/isureal
@@ -14,6 +20,9 @@ REMOTE_APP_BIN := /home/isucon/webapp/go/isureal
 APP_HOSTS ?= isucon-s1 isucon-s2 isucon-s3
 DB_HOST := isucon-s4
 STANDBY_DB_HOSTS ?= isucon-s2 isucon-s3
+# 競技サーバは linux/amd64。Mac から make deploy しても Exec format error にしない。
+GOOS ?= linux
+GOARCH ?= amd64
 
 .PHONY: *
 gogo: stop-services deploy/sync logs/clear start-services
@@ -24,7 +33,7 @@ stop-services:
 	ssh $(DB_HOST) "sudo systemctl stop postgresql"
 
 build:
-	cd go && make
+	cd go && GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o isureal cmd/isureal/main.go
 
 # ビルドしてバイナリだけ配る（サービスは触らない）。gogo から呼ぶ。
 deploy/sync: build
@@ -77,6 +86,37 @@ etc-sync/deploy/apply:
 etc-sync/diff:
 	./mybin/etc-sync/etc-sync.sh diff
 
+# レプリカ構成。何度流しても安全（basebackup の取り直しだけ FORCE=1）。
+replica/ensure:
+	./mybin/postgres/replica-ensure.sh
+
+replica/basebackup/europe1:
+	./mybin/postgres/replica-basebackup.sh europe1
+
+replica/basebackup/america1:
+	./mybin/postgres/replica-basebackup.sh america1
+
+replica/sync/on:
+	./mybin/postgres/replica-sync.sh on
+
+replica/sync/off:
+	./mybin/postgres/replica-sync.sh off
+
+replica/sync/status:
+	./mybin/postgres/replica-sync.sh status
+
+replica/read-host/on:
+	./mybin/postgres/replica-read-host.sh on
+
+replica/read-host/off:
+	./mybin/postgres/replica-read-host.sh off
+
+replica/read-host/status:
+	./mybin/postgres/replica-read-host.sh status
+
+replica/status:
+	ssh $(DB_HOST) "sudo -u postgres psql -c \"SELECT application_name, client_addr, state, sync_state, replay_lag FROM pg_stat_replication ORDER BY 1;\" -c \"SELECT slot_name, active, restart_lsn FROM pg_replication_slots;\""
+	$(foreach h,$(STANDBY_DB_HOSTS),ssh $(h) "echo '--- $(h) ---'; sudo -u postgres psql -c \"SELECT pg_is_in_recovery(); SELECT status, slot_name, sender_host FROM pg_stat_wal_receiver;\" 2>&1 || echo 'pg down';")
 
 # 録画・再生で変更を20秒前後で確かめる (.agents/skills/isubench/SKILL.md)
 isubench/%:

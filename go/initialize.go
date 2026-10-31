@@ -28,6 +28,9 @@ func initializeHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
+		if err := backfillUserSearchNorms(c.Request().Context(), h.DB); err != nil {
+			return err
+		}
 		if err := purgeAllSessions(c.Request().Context(), h); err != nil {
 			return err
 		}
