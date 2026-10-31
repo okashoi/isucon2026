@@ -14,8 +14,10 @@ import (
 const preparedQuery = pgx.QueryExecModeCacheStatement
 
 type Config struct {
-	Region     string
-	DBHost     string
+	Region string
+	DBHost string
+	// DBReadHost が空なら読みも DBHost（primary）へ。s2/s3 では 127.0.0.1 を想定。
+	DBReadHost string
 	DBPort     string
 	DBUser     string
 	DBPassword string
@@ -29,6 +31,7 @@ func ConfigFromEnv() *Config {
 	return &Config{
 		Region:     envOrDefault("ISUREAL_REGION", "asia"),
 		DBHost:     envOrDefault("ISUREAL_DB_HOST", "127.0.0.1"),
+		DBReadHost: os.Getenv("ISUREAL_DB_READ_HOST"),
 		DBPort:     envOrDefault("ISUREAL_DB_PORT", "5432"),
 		DBUser:     envOrDefault("ISUREAL_DB_USER", "isureal"),
 		DBPassword: envOrDefault("ISUREAL_DB_PASSWORD", "isureal"),
@@ -43,10 +46,22 @@ func ConfigFromEnv() *Config {
 }
 
 func (c *Config) DatabaseDSN() string {
+	return c.databaseDSN(c.DBHost)
+}
+
+func (c *Config) DatabaseReadDSN() string {
+	host := c.DBReadHost
+	if host == "" {
+		host = c.DBHost
+	}
+	return c.databaseDSN(host)
+}
+
+func (c *Config) databaseDSN(host string) string {
 	u := url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(c.DBUser, c.DBPassword),
-		Host:     net.JoinHostPort(c.DBHost, c.DBPort),
+		Host:     net.JoinHostPort(host, c.DBPort),
 		Path:     "/" + c.DBName,
 		RawQuery: "default_query_exec_mode=simple_protocol",
 	}

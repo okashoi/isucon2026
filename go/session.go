@@ -50,7 +50,7 @@ func getSessionFromHeader(c *echo.Context, h *HandlerContext) (*Session, error) 
 	}
 	generation := h.Sessions.Generation()
 	var session Session
-	err := h.DB.GetContext(c.Request().Context(), &session, `
+	err := h.ReadDB.GetContext(c.Request().Context(), &session, `
 		SELECT s.user_id, s.token_hash, s.created_at, u.region
 		FROM login_sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = $1

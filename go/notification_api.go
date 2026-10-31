@@ -36,7 +36,7 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 		session := GetSession(c)
 		userID := session.UserID
 		var connectedAt time.Time
-		if err := h.DB.GetContext(ctx, &connectedAt, `SELECT clock_timestamp()`); err != nil {
+		if err := h.ReadDB.GetContext(ctx, &connectedAt, `SELECT clock_timestamp()`); err != nil {
 			return err
 		}
 		response := c.Response()
@@ -50,7 +50,7 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 		defer ticker.Stop()
 		for {
 			var poll notificationPoll
-			err := h.DB.GetContext(ctx, &poll, `
+			err := h.ReadDB.GetContext(ctx, &poll, `
     SELECT u.region, w.id AS posting_window_id, w.starts_at
     FROM users u
     LEFT JOIN posting_windows w ON w.region = u.region AND w.ended_at IS NULL AND w.starts_at > $2

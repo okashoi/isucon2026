@@ -19,12 +19,12 @@ func exportPostsHandler(h *HandlerContext) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
-		author, err := getUser(ctx, h.DB, userID)
+		author, err := getUser(ctx, h.ReadDB, userID)
 		if err != nil {
 			return err
 		}
 		var posts []Post
-		if err := h.DB.SelectContext(ctx, &posts, `
+		if err := h.ReadDB.SelectContext(ctx, &posts, `
    SELECT `+postColumns+`
    FROM posts p
    JOIN posting_windows w ON w.id = p.posting_window_id
@@ -37,7 +37,7 @@ func exportPostsHandler(h *HandlerContext) echo.HandlerFunc {
 		for i, post := range posts {
 			imageIDs[i] = post.ImageID
 		}
-		images, err := h.PostImages.Bytes(ctx, h.DB, imageIDs)
+		images, err := h.PostImages.Bytes(ctx, h.ReadDB, imageIDs)
 		if err != nil {
 			return err
 		}
