@@ -233,7 +233,7 @@ func updatePostHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
-		tx, err := h.DB.BeginTxx(ctx, nil)
+		tx, err := beginLocalTx(ctx, h.DB)
 		if err != nil {
 			return err
 		}
@@ -301,7 +301,7 @@ func deletePostHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
-		tx, err := h.DB.BeginTxx(ctx, nil)
+		tx, err := beginLocalTx(ctx, h.DB)
 		if err != nil {
 			return err
 		}

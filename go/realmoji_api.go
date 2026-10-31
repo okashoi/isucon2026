@@ -99,11 +99,12 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		id := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO realmojis(id,post_id,reactor_id,image_id,reaction_type,created_at) VALUES($1,$2,$3,$4,$5,clock_timestamp())`, id, post.ID, actor, imageID, input.ReactionType); err != nil {
-			return err
-		}
-		reaction, err := getRealMoji(ctx, tx, id)
-		if err != nil {
+		var reaction RealMoji
+		if err := tx.GetContext(ctx, &reaction, `
+   INSERT INTO realmojis(id,post_id,reactor_id,image_id,reaction_type,created_at)
+   VALUES($1,$2,$3,$4,$5,clock_timestamp())
+   RETURNING id, post_id, reactor_id, image_id, reaction_type, created_at, replaced_at, deleted_at`,
+			id, post.ID, actor, imageID, input.ReactionType); err != nil {
 			return err
 		}
 		user, err := getUser(ctx, tx, actor)
@@ -175,7 +176,7 @@ func deleteRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		tx, err := h.DB.BeginTxx(ctx, nil)
+		tx, err := beginLocalTx(ctx, h.DB)
 		if err != nil {
 			return err
 		}

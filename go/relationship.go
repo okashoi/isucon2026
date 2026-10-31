@@ -16,11 +16,23 @@ func validateRelationshipTarget(actor, target string) error {
 	return nil
 }
 
+func beginLocalTx(ctx context.Context, db *sqlx.DB) (*sqlx.Tx, error) {
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('synchronous_commit', 'local', true)`); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
 func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string) (*sqlx.Tx, error) {
 	if err := validateRelationshipTarget(actor, target); err != nil {
 		return nil, err
 	}
-	tx, err := db.BeginTxx(ctx, nil)
+	tx, err := beginLocalTx(ctx, db)
 	if err != nil {
 		return nil, err
 	}

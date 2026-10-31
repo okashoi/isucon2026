@@ -44,7 +44,7 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		tx, err := h.DB.BeginTxx(ctx, nil)
+		tx, err := beginLocalTx(ctx, h.DB)
 		if err != nil {
 			return err
 		}
@@ -135,7 +135,7 @@ func deleteCommentHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		tx, err := h.DB.BeginTxx(ctx, nil)
+		tx, err := beginLocalTx(ctx, h.DB)
 		if err != nil {
 			return err
 		}
