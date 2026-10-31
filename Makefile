@@ -78,6 +78,17 @@ etc-sync/diff:
 	./mybin/etc-sync/etc-sync.sh diff
 
 
+# 攻撃の検知はアプリが行うので isureal-guard は使わない。guard/off はサーバの再起動後も効く。
+# guard はアクションログを読むので、guard/on のあと BAN を書かせるには ISUREAL_LOG_LEVEL を info 以下にする。
+guard/off:
+	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo systemctl disable --now isureal-guard";)
+
+guard/on:
+	$(foreach h,$(APP_HOSTS),ssh $(h) "sudo systemctl enable --now isureal-guard";)
+
+guard/status:
+	$(foreach h,$(APP_HOSTS),ssh $(h) "echo '--- $(h) ---'; systemctl is-enabled isureal-guard; systemctl is-active isureal-guard || true";)
+
 # 録画・再生で変更を20秒前後で確かめる (.agents/skills/isubench/SKILL.md)
 isubench/%:
 	./mybin/isubench/isubench.sh $*
