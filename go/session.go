@@ -50,7 +50,8 @@ func getSessionFromHeader(c *echo.Context, h *HandlerContext) (*Session, error) 
 	}
 	generation := h.Sessions.Generation()
 	var session Session
-	err := h.ReadDB.GetContext(c.Request().Context(), &session, `
+	// login_user は standby の反映を待たずに commit するので、standby では置き換え前のセッションが有効に見えることがある。
+	err := h.DB.GetContext(c.Request().Context(), &session, `
 		SELECT s.user_id, s.token_hash, s.created_at, u.region
 		FROM login_sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = $1
@@ -93,14 +94,15 @@ func InvalidateLoginSession(db *sqlx.DB, userID string, tokenHash string) (strin
 	return region, nil
 }
 
-// loginUser は認証に成功したら、有効なセッションを新しいものに置き換えてトークンを返す。
+// loginUser は認証に成功したら、有効なセッションを新しいものに置き換えてトークンとそのハッシュを返す。
 // 認証に失敗したら sql.ErrNoRows を返す。
-func loginUser(ctx context.Context, db sqlx.QueryerContext, username, secretKey string) (User, string, error) {
+func loginUser(ctx context.Context, db sqlx.QueryerContext, username, secretKey string) (User, string, string, error) {
 	secretKeyHash := sha256.Sum256([]byte(secretKey))
 	token := uuid.NewString()
-	tokenHash := sha256.Sum256([]byte(token))
+	tokenHashBytes := sha256.Sum256([]byte(token))
+	tokenHash := hex.EncodeToString(tokenHashBytes[:])
 	var user User
 	err := sqlx.GetContext(ctx, db, &user, `SELECT `+userColumnList+` FROM login_user($1, $2, $3)`,
-		username, hex.EncodeToString(secretKeyHash[:]), hex.EncodeToString(tokenHash[:]))
-	return user, token, err
+		username, hex.EncodeToString(secretKeyHash[:]), tokenHash)
+	return user, token, tokenHash, err
 }

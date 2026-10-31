@@ -102,14 +102,18 @@ func loginHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
 		}
 		ctx := c.Request().Context()
-		user, token, err := loginUser(ctx, h.DB, input.Username, input.SecretKey)
+		generation := h.Sessions.Generation()
+		user, token, tokenHash, err := loginUser(ctx, h.DB, input.Username, input.SecretKey)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
 		}
 		if err != nil {
 			return err
 		}
-		if err := purgeUserSession(ctx, h, user.Region, user.ID); err != nil {
+		// キャッシュにないセッションは primary から引くので、直後のリクエストが WAN を往復しないよう自リージョンの利用者はここで入れる。
+		if user.Region == h.Config.Region {
+			h.Sessions.Replace(generation, Session{Region: user.Region, UserID: user.ID, TokenHash: tokenHash})
+		} else if err := purgeUserSession(ctx, h, user.Region, user.ID); err != nil {
 			return err
 		}
 		return c.JSON(http.StatusOK, loginResponse{Token: token, User: newSessionUserResponse(user)})

@@ -67,6 +67,8 @@ CREATE INDEX IF NOT EXISTS follows_followee_id ON follows(followee_id);
 -- VOLATILE なので文ごとにスナップショットを取り直し、advisory lock を待ったあとの文は最新の関係を読む。
 -- p_pair_key は Go の userPairAdvisoryKey の値で、lockUserPair と同じペアを直列化する。
 -- result は ok / not_found / conflict で、ok のときだけ relation_* が入る。
+-- 申請と承認は見えるものを増やすだけなので、standby の反映を待たずに commit する。
+-- set_config の第3引数 true は呼び出し元のトランザクションの終わりまで効くので、明示トランザクションの中では呼ばない。
 CREATE OR REPLACE FUNCTION create_friend_request(
   p_actor text,
   p_target text,
@@ -81,6 +83,7 @@ DECLARE
   v_pending_id text;
   v_pending_requester_id text;
 BEGIN
+  PERFORM set_config('synchronous_commit', 'local', true);
   PERFORM pg_advisory_xact_lock(p_pair_key);
 
   SELECT count(*) INTO v_active_users FROM (
@@ -207,11 +210,14 @@ END;
 $$;
 
 -- 認証に失敗したら行を返さない。有効なセッションが複数残らないよう、users 行のロックの下で置き換える。
+-- standby の反映を待たずに commit する。置き換えた古いセッションが standby でまだ有効に見えるので、
+-- Go 側はキャッシュにないセッションを primary から引く。明示トランザクションの中では呼ばない。
 CREATE OR REPLACE FUNCTION login_user(p_username text, p_secret_key_hash text, p_token_hash text)
 RETURNS SETOF users LANGUAGE plpgsql AS $$
 DECLARE
   v_user users;
 BEGIN
+  PERFORM set_config('synchronous_commit', 'local', true);
   SELECT * INTO v_user FROM users WHERE username = p_username FOR NO KEY UPDATE;
   IF NOT FOUND OR v_user.status <> 'active' OR v_user.secret_key_hash <> p_secret_key_hash THEN
     RETURN;

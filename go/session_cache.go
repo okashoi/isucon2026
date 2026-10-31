@@ -23,10 +23,13 @@ type SessionCache struct {
 	generation        uint64
 	sessions          map[string]Session
 	tokenHashByUserID map[string]string
+	// Replace が利用者ごとに破棄の有無を見るための、最後に破棄したときの generation。
+	purgedAtByUserID map[string]uint64
+	purgedAllAt      uint64
 }
 
 func NewSessionCache() *SessionCache {
-	return &SessionCache{sessions: map[string]Session{}, tokenHashByUserID: map[string]string{}}
+	return &SessionCache{sessions: map[string]Session{}, tokenHashByUserID: map[string]string{}, purgedAtByUserID: map[string]uint64{}}
 }
 
 func (c *SessionCache) Get(tokenHash string) (*Session, bool) {
@@ -55,12 +58,32 @@ func (c *SessionCache) Add(generation uint64, session Session) {
 	c.tokenHashByUserID[session.UserID] = session.TokenHash
 }
 
+// Replace はログインの commit 後に呼び、利用者のセッションを破棄して新しいセッションに置き換える。
+// generation はログインの DB 操作の前に取得する。取得後にその利用者の破棄があったら、
+// 置き換えより新しい変更かもしれないので保存せず、破棄だけする。ほかの利用者の破棄は見ない。
+func (c *SessionCache) Replace(generation uint64, session Session) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	stale := c.purgedAllAt > generation || c.purgedAtByUserID[session.UserID] > generation
+	c.purgeUserLocked(session.UserID)
+	if stale {
+		return
+	}
+	c.sessions[session.TokenHash] = session
+	c.tokenHashByUserID[session.UserID] = session.TokenHash
+}
+
 func (c *SessionCache) PurgeUser(userID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.purgeUserLocked(userID)
+}
+
+func (c *SessionCache) purgeUserLocked(userID string) {
 	c.generation++
 	delete(c.sessions, c.tokenHashByUserID[userID])
 	delete(c.tokenHashByUserID, userID)
+	c.purgedAtByUserID[userID] = c.generation
 }
 
 func (c *SessionCache) PurgeAll() {
@@ -69,6 +92,8 @@ func (c *SessionCache) PurgeAll() {
 	c.generation++
 	clear(c.sessions)
 	clear(c.tokenHashByUserID)
+	clear(c.purgedAtByUserID)
+	c.purgedAllAt = c.generation
 }
 
 // purgeUserSession はセッションや所属リージョンの変更を commit したあと、応答を返す前に呼ぶ。
