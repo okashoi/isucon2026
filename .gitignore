@@ -1,8 +1,1 @@
-._go
-._nodejs
-._perl
-._php
-._python
-._ruby
-._rust
-._sql
+._*
