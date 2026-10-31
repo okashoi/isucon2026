@@ -95,23 +95,23 @@ func getPostWithAuthor(ctx context.Context, db sqlx.QueryerContext, postID strin
 
 type viewerContext struct {
 	User
-	HasPostedToday   bool
-	Friends          map[string]bool
-	FriendsOfFriends map[string]bool
-	MutualFriends    map[string]int
-	Blocked          map[string]bool
+	HasPostedToday         bool
+	Friends                map[string]bool
+	FriendsOfFriends       map[string]bool
+	MutualFriends          map[string]int
+	Blocked                map[string]bool
+	friendsOfFriendsLoaded bool
 }
 
-// loadViewerContext は europe と america からは WAN 越しになるので、1 往復で取る。
-// friends_of_friends は友達の友達ごとの共通の友達の数で、友達がいれば本人も含む。
+// loadViewerContext は利用者、友達、ブロック、今日の投稿有無を 1 往復で取る。
+// 友達の友達の集計は重いので、loadFriendsOfFriends を必要なリクエストだけが呼ぶ。
 func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID string) (viewerContext, error) {
 	viewer := viewerContext{Friends: map[string]bool{}, FriendsOfFriends: map[string]bool{}, MutualFriends: map[string]int{}, Blocked: map[string]bool{}}
 	var row struct {
 		User
-		HasPostedToday   bool   `db:"has_posted_today"`
-		BlockedIDs       []byte `db:"blocked_ids"`
-		FriendIDs        []byte `db:"friend_ids"`
-		FriendsOfFriends []byte `db:"friends_of_friends"`
+		HasPostedToday bool   `db:"has_posted_today"`
+		BlockedIDs     []byte `db:"blocked_ids"`
+		FriendIDs      []byte `db:"friend_ids"`
 	}
 	if err := sqlx.GetContext(ctx, db, &row, `
   WITH viewer AS (
@@ -120,12 +120,6 @@ func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID str
     SELECT user_high_id AS id FROM friendships WHERE user_low_id = $1
     UNION ALL
     SELECT user_low_id FROM friendships WHERE user_high_id = $1
-  ), friend_edges AS (
-    SELECT s.user_high_id AS id FROM friends f JOIN friendships s ON s.user_low_id = f.id
-    UNION ALL
-    SELECT s.user_low_id FROM friends f JOIN friendships s ON s.user_high_id = f.id
-  ), friends_of_friends AS (
-    SELECT id, count(*) AS mutual_friends FROM friend_edges GROUP BY id
   )
   SELECT viewer.*,
     EXISTS(
@@ -137,8 +131,7 @@ func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID str
     ) AS has_posted_today,
     (SELECT coalesce(json_agg(CASE WHEN blocker_id = $1 THEN blocked_id ELSE blocker_id END), '[]')
      FROM block_relations WHERE blocker_id = $1 OR blocked_id = $1) AS blocked_ids,
-    (SELECT coalesce(json_agg(id), '[]') FROM friends) AS friend_ids,
-    (SELECT coalesce(json_object_agg(id, mutual_friends), '{}') FROM friends_of_friends) AS friends_of_friends
+    (SELECT coalesce(json_agg(id), '[]') FROM friends) AS friend_ids
   FROM viewer
  `, viewerID); err != nil {
 		return viewer, err
@@ -146,14 +139,10 @@ func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID str
 	viewer.User = row.User
 	viewer.HasPostedToday = row.HasPostedToday
 	var blockedIDs, friendIDs []string
-	var friendsOfFriends map[string]int
 	if err := json.Unmarshal(row.BlockedIDs, &blockedIDs); err != nil {
 		return viewer, err
 	}
 	if err := json.Unmarshal(row.FriendIDs, &friendIDs); err != nil {
-		return viewer, err
-	}
-	if err := json.Unmarshal(row.FriendsOfFriends, &friendsOfFriends); err != nil {
 		return viewer, err
 	}
 	for _, id := range blockedIDs {
@@ -162,16 +151,64 @@ func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID str
 	for _, id := range friendIDs {
 		viewer.Friends[id] = true
 	}
+	if err := viewer.setImageKey(); err != nil {
+		return viewer, err
+	}
+	return viewer, nil
+}
+
+// loadFriendsOfFriends は友達の友達と、その人との共通の友達の数を取る。
+// 友達がいれば本人も FriendsOfFriends に含む。共通の友達の数には本人を入れない。
+// 友達がいないときの集計は空なので、DB には問い合わせない。
+func (viewer *viewerContext) loadFriendsOfFriends(ctx context.Context, db sqlx.QueryerContext) error {
+	if viewer.friendsOfFriendsLoaded {
+		return nil
+	}
+	if len(viewer.Friends) == 0 {
+		viewer.friendsOfFriendsLoaded = true
+		return nil
+	}
+	var raw []byte
+	if err := sqlx.GetContext(ctx, db, &raw, `
+  WITH friends AS (
+    SELECT user_high_id AS id FROM friendships WHERE user_low_id = $1
+    UNION ALL
+    SELECT user_low_id FROM friendships WHERE user_high_id = $1
+  ), friend_edges AS (
+    SELECT s.user_high_id AS id FROM friends f JOIN friendships s ON s.user_low_id = f.id
+    UNION ALL
+    SELECT s.user_low_id FROM friends f JOIN friendships s ON s.user_high_id = f.id
+  )
+  SELECT coalesce(json_object_agg(id, mutual_friends), '{}')
+  FROM (
+    SELECT id, count(*) AS mutual_friends FROM friend_edges GROUP BY id
+  ) friends_of_friends
+ `, viewer.ID); err != nil {
+		return err
+	}
+	var friendsOfFriends map[string]int
+	if err := json.Unmarshal(raw, &friendsOfFriends); err != nil {
+		return err
+	}
 	for id, mutualFriends := range friendsOfFriends {
 		viewer.FriendsOfFriends[id] = true
 		if id != viewer.ID {
 			viewer.MutualFriends[id] = mutualFriends
 		}
 	}
-	if err := viewer.setImageKey(); err != nil {
-		return viewer, err
+	viewer.friendsOfFriendsLoaded = true
+	return nil
+}
+
+// prepareCanView は canView が友達の友達を参照するときだけ集計を取る。
+func (viewer *viewerContext) prepareCanView(ctx context.Context, db sqlx.QueryerContext, post Post) error {
+	if post.AuthorID == viewer.ID || post.WindowEndedAt != nil || !viewer.HasPostedToday || viewer.Blocked[post.AuthorID] {
+		return nil
 	}
-	return viewer, nil
+	if post.Visibility != "friends_of_friends" || viewer.Friends[post.AuthorID] {
+		return nil
+	}
+	return viewer.loadFriendsOfFriends(ctx, db)
 }
 
 func (viewer viewerContext) canView(post Post) bool {
@@ -206,6 +243,9 @@ func canViewPost(ctx context.Context, db sqlx.QueryerContext, viewerID, postID s
 		return false, nil
 	}
 	if err != nil {
+		return false, err
+	}
+	if err := viewer.prepareCanView(ctx, db, post.Post); err != nil {
 		return false, err
 	}
 	return viewer.canView(post.Post), nil

@@ -237,6 +237,11 @@ func getPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		if err == nil {
+			if err := viewer.prepareCanView(ctx, h.ReadDB, post.Post); err != nil {
+				return err
+			}
+		}
 		if err != nil || !viewer.canView(post.Post) {
 			return NewAPIError(http.StatusNotFound, "post_not_found")
 		}

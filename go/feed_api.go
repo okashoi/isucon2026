@@ -64,6 +64,12 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 		if !viewer.HasPostedToday {
 			return c.JSON(http.StatusOK, getFeedResponse{Items: []feedItemResponse{}})
 		}
+		// フォローは公開範囲の SQL が友達の友達を使い、友達の友達フィードは作者の絞り込みとスコアが使う。
+		if input.Feed == "following" || ranked {
+			if err := viewer.loadFriendsOfFriends(ctx, h.ReadDB); err != nil {
+				return err
+			}
+		}
 		following := map[string]bool{}
 		if input.Feed == "following" {
 			var followeeIDs []string
