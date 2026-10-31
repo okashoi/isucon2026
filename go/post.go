@@ -269,18 +269,3 @@ func getFriendIDs(ctx context.Context, db sqlx.QueryerContext, userID string) ([
 	}
 	return ids, nil
 }
-
-func getBlockedUserIDs(ctx context.Context, db sqlx.QueryerContext, userID string) (map[string]bool, error) {
-	var ids []string
-	if err := sqlx.SelectContext(ctx, db, &ids, `
-  SELECT CASE WHEN blocker_id = $1 THEN blocked_id ELSE blocker_id END
-  FROM block_relations WHERE blocker_id = $1 OR blocked_id = $1
- `, userID); err != nil {
-		return nil, err
-	}
-	blocked := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		blocked[id] = true
-	}
-	return blocked, nil
-}
