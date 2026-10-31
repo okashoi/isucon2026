@@ -41,23 +41,18 @@ func searchUsersHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		viewer := GetSession(c).UserID
-		var users []User
-		if err := h.ReadDB.SelectContext(ctx, &users, `SELECT `+strings.Join(userColumns, ", ")+` FROM users WHERE status='active' AND id<>$1 AND ($2='' OR (username,id)>($2,$3)) ORDER BY username, id`, viewer, input.BeforeUsername, input.BeforeID); err != nil {
-			return err
-		}
-		blocked, err := getBlockedUserIDs(ctx, h.ReadDB, viewer)
-		if err != nil {
-			return err
-		}
 		query := normalizeSearchText(input.Q)
-		items := make([]relationshipUserResponse, 0)
+		var users []User
+		if err := h.ReadDB.SelectContext(ctx, &users, `SELECT `+strings.Join(userColumns, ", ")+` FROM users u
+			WHERE status='active' AND id<>$1
+			  AND (strpos(username_norm, $2) > 0 OR strpos(display_name_norm, $2) > 0)
+			  AND NOT EXISTS (SELECT 1 FROM block_relations b WHERE (b.blocker_id=$1 AND b.blocked_id=u.id) OR (b.blocker_id=u.id AND b.blocked_id=$1))
+			  AND ($3='' OR (username,id)>($3,$4))
+			ORDER BY username, id LIMIT 51`, viewer, query, input.BeforeUsername, input.BeforeID); err != nil {
+			return err
+		}
+		items := make([]relationshipUserResponse, 0, len(users))
 		for _, user := range users {
-			if !strings.Contains(normalizeSearchText(user.Username), query) && !strings.Contains(normalizeSearchText(user.DisplayName), query) {
-				continue
-			}
-			if blocked[user.ID] {
-				continue
-			}
 			if err := user.setImageKey(); err != nil {
 				return err
 			}
@@ -65,9 +60,6 @@ func searchUsersHandler(h *HandlerContext) echo.HandlerFunc {
 				user.Bio = ""
 			}
 			items = append(items, newRelationshipUserResponse(user))
-			if len(items) == 51 {
-				break
-			}
 		}
 		hasMore := len(items) > 50
 		if hasMore {
