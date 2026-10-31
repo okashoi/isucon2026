@@ -43,7 +43,7 @@ func openPostingWindowHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		// このリージョンの在籍変更とだけ直列化する。通知の宛先はここからコミットまでの users を見る。
+		// 同じリージョンの開始どうしを直列化し、競合を posting_window_conflict で返す。
 		if err := lockRegionMemberships(ctx, tx, region); err != nil {
 			return err
 		}
@@ -69,13 +69,6 @@ func openPostingWindowHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
-			return err
-		}
-		// users のテーブルロックを外してから、リージョン全員分の通知を入れる。
-		if _, err := h.DB.ExecContext(ctx, `
-   INSERT INTO notifications (id, user_id, posting_window_id, created_at)
-   SELECT gen_random_uuid()::text, id, $2, $3 FROM users WHERE region = $1 AND status = 'active'
-  `, region, windowID, startsAt); err != nil {
 			return err
 		}
 		window, err := getPostingWindow(ctx, h.DB, windowID)

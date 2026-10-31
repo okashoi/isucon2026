@@ -4,7 +4,6 @@ BEGIN;
 
 TRUNCATE ip_bans, login_sessions, administrator_sessions, friendships, friend_requests, follows, block_relations;
 
-DELETE FROM notifications WHERE created_at > (SELECT created_at FROM initial_data_boundary);
 DELETE FROM comments WHERE created_at > (SELECT created_at FROM initial_data_boundary);
 DELETE FROM realmojis WHERE created_at > (SELECT created_at FROM initial_data_boundary);
 DELETE FROM posts WHERE created_at > (SELECT created_at FROM initial_data_boundary);

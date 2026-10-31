@@ -8,14 +8,26 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
 
 type getNotificationsResponse struct {
-	ID              string    `json:"id" db:"id"`
-	PostingWindowID string    `json:"postingWindowId" db:"posting_window_id"`
-	Region          string    `json:"region" db:"region"`
-	CreatedAt       time.Time `json:"createdAt" db:"created_at"`
+	ID              string    `json:"id"`
+	PostingWindowID string    `json:"postingWindowId"`
+	Region          string    `json:"region"`
+	CreatedAt       time.Time `json:"createdAt"`
+}
+
+type notificationPoll struct {
+	Region          string     `db:"region"`
+	PostingWindowID *string    `db:"posting_window_id"`
+	StartsAt        *time.Time `db:"starts_at"`
+}
+
+// notificationID は通知を行として持たないので、投稿期間と利用者の組から決定的に作る。
+func notificationID(postingWindowID, userID string) string {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(postingWindowID+"/"+userID)).String()
 }
 
 func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
@@ -37,25 +49,29 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
-			user, err := getUser(ctx, h.DB, userID)
+			var poll notificationPoll
+			err := h.DB.GetContext(ctx, &poll, `
+    SELECT u.region, w.id AS posting_window_id, w.starts_at
+    FROM users u
+    LEFT JOIN posting_windows w ON w.region = u.region AND w.ended_at IS NULL AND w.starts_at > $2
+    WHERE u.id = $1 AND u.status = 'active'
+   `, userID, connectedAt)
 			if err != nil {
 				if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
-					c.Logger().Error("failed to get notification recipient", "error", err)
+					c.Logger().Error("failed to get notification", "error", err)
 				}
 				return nil
 			}
-			if user.Region != session.Region {
+			if poll.Region != session.Region {
 				return nil
 			}
-			var notification getNotificationsResponse
-			err = h.DB.GetContext(ctx, &notification, `
-    SELECT n.id, n.posting_window_id, w.region, n.created_at
-    FROM notifications n JOIN posting_windows w ON w.id = n.posting_window_id
-    WHERE n.user_id = $1 AND n.created_at > $2 AND w.ended_at IS NULL
-    ORDER BY n.created_at, n.id LIMIT 1
-   `, userID, connectedAt)
-			if err == nil {
-				data, err := json.Marshal(notification)
+			if poll.PostingWindowID != nil {
+				data, err := json.Marshal(getNotificationsResponse{
+					ID:              notificationID(*poll.PostingWindowID, userID),
+					PostingWindowID: *poll.PostingWindowID,
+					Region:          poll.Region,
+					CreatedAt:       *poll.StartsAt,
+				})
 				if err != nil {
 					c.Logger().Error("failed to encode notification", "error", err)
 					return nil
@@ -64,12 +80,6 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 					return nil
 				}
 				_ = controller.Flush()
-				return nil
-			}
-			if !errors.Is(err, sql.ErrNoRows) {
-				if ctx.Err() == nil {
-					c.Logger().Error("failed to get notification", "error", err)
-				}
 				return nil
 			}
 			select {
