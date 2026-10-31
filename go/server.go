@@ -53,7 +53,13 @@ func NewServer(config *Config) *echo.Echo {
 		readDB = openDB(config.DatabaseReadDSN())
 	}
 
-	postImages, err := NewPostImageStore()
+	var peers []string
+	for region, peerURL := range config.PeerURLs {
+		if region != config.Region {
+			peers = append(peers, peerURL)
+		}
+	}
+	postImages, err := NewPostImageStore(peers)
 	if err != nil {
 		panic("failed to prepare post image directory: " + err.Error())
 	}
@@ -71,6 +77,8 @@ func NewServer(config *Config) *echo.Echo {
 	e.DELETE("/internal/session-cache", purgeAllSessionsHandler(handlerContext))
 	e.DELETE("/internal/session-cache/:userId", purgeUserSessionHandler(handlerContext))
 	e.DELETE("/internal/image-cache", purgeImageCacheHandler(handlerContext))
+	e.PUT("/internal/image-blob/:imageId", putImageBlobHandler(handlerContext))
+	e.GET("/internal/image-blob/:imageId", getImageBlobHandler(handlerContext))
 	// make post-images/sync が asia1 へ送る。
 	e.POST("/internal/post-image-cache", fillPostImageCacheHandler(handlerContext))
 

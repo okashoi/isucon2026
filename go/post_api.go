@@ -86,7 +86,8 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 		// 画像 INSERT だけ synchronous_commit=local。投稿の remote_apply コミット時点で画像 WAL も適用済み。
 		imageID := uuid.NewString()
 		imageCreatedAt := time.Now().UTC()
-		if err := insertImageObjectLocalSync(ctx, h.DB, imageID, userID, imageData, imageCreatedAt); err != nil {
+		imageBody := h.PostImages.Replicate(ctx, imageID, imageData)()
+		if err := insertImageObjectLocalSync(ctx, h.DB, imageID, userID, imageBody, imageCreatedAt); err != nil {
 			return err
 		}
 		keepImage := false
@@ -106,8 +107,6 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		keepImage = true
-		// 失敗しても投稿は確定している。取得とエクスポートはファイルが無い画像だけ DB から取る。
-		_ = h.PostImages.Save(imageID, imageData)
 		if err := post.Author.setImageKey(); err != nil {
 			return err
 		}

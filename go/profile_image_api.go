@@ -30,6 +30,8 @@ func putProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
+		imageID := uuid.NewString()
+		imageBody := h.PostImages.Replicate(ctx, imageID, data)
 		tx, err := h.DB.BeginTxx(ctx, nil)
 		if err != nil {
 			return err
@@ -42,8 +44,7 @@ func putProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 			}
 			return err
 		}
-		imageID := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type) VALUES ($1,$2,$3,'image/jpeg')`, preparedQuery, imageID, userID, data); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type) VALUES ($1,$2,$3,'image/jpeg')`, preparedQuery, imageID, userID, imageBody()); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE users SET profile_image_id=$2,updated_at=clock_timestamp() WHERE id=$1`, userID, imageID); err != nil {
@@ -57,8 +58,6 @@ func putProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		// 失敗しても取得はファイルが無い画像だけ DB から読む。
-		_ = h.PostImages.Save(imageID, data)
 		return c.NoContent(http.StatusNoContent)
 	}
 }

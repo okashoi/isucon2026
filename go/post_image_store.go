@@ -1,8 +1,12 @@
 package isureal
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,9 +25,13 @@ type PostImageStore struct {
 	// 実行中に書き込んだ画像と、DB から読んだ画像。初期化で消す。
 	runtimeDir string
 	mu         sync.Mutex
+	// 自分以外のリージョンのアプリサーバ。
+	peers []string
 }
 
-func NewPostImageStore() (*PostImageStore, error) {
+var errImageBodyMissing = errors.New("image body missing on all servers")
+
+func NewPostImageStore(peers []string) (*PostImageStore, error) {
 	dir := os.Getenv("ISUREAL_POST_IMAGE_DIR")
 	if dir == "" {
 		// 作業ディレクトリは go/ なので webapp/post-images になる。make post-images/sync もここへ配る。
@@ -38,7 +46,7 @@ func NewPostImageStore() (*PostImageStore, error) {
 			return nil, err
 		}
 	}
-	return &PostImageStore{dir: dir, runtimeDir: runtimeDir}, nil
+	return &PostImageStore{dir: dir, runtimeDir: runtimeDir, peers: peers}, nil
 }
 
 func imageFilePath(dir, id string) (string, error) {
@@ -81,6 +89,88 @@ func (s *PostImageStore) Save(id string, data []byte) error {
 	return save(s.runtimeDir, id, data)
 }
 
+// saveIfAbsent は既にあれば何もしない。ID ごとに中身は変わらないので、後から来た配布で上書きしない。
+func (s *PostImageStore) saveIfAbsent(id string, data []byte) error {
+	path, err := imageFilePath(s.runtimeDir, id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	return save(s.runtimeDir, id, data)
+}
+
+// Replicate は id の本体をこのサーバと全ピアのローカルに置き始める。
+// 返す関数は完了を待ち、image_objects.data に入れる値を返す。全台に置けたら空、どこかで失敗したら本体。
+// 空の行を commit してよいのは全台に置けたあとだけなので、行を INSERT する前に必ず待つ。
+func (s *PostImageStore) Replicate(ctx context.Context, id string, data []byte) (wait func() []byte) {
+	ctx = context.WithoutCancel(ctx)
+	errs := make(chan error, len(s.peers)+1)
+	go func() { errs <- s.Save(id, data) }()
+	for _, peer := range s.peers {
+		go func() { errs <- putPeerImage(ctx, peer+"/internal/image-blob/"+id, data) }()
+	}
+	return func() []byte {
+		var err error
+		for range len(s.peers) + 1 {
+			err = errors.Join(err, <-errs)
+		}
+		if err != nil {
+			log.Printf("image replicate failed; storing body in DB: %v", err)
+			return data
+		}
+		return []byte{}
+	}
+}
+
+func putPeerImage(ctx context.Context, target string, data []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, target, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	res, err := peerClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("put peer image: %s: %s", target, res.Status)
+	}
+	return nil
+}
+
+// pullFromPeers は DB の行が空のとき、ピアのローカルにある本体を取ってきて置く。
+func (s *PostImageStore) pullFromPeers(ctx context.Context, id string) ([]byte, error) {
+	for _, peer := range s.peers {
+		data, err := getPeerImage(ctx, peer+"/internal/image-blob/"+id)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		_ = s.saveIfAbsent(id, data)
+		return data, nil
+	}
+	return nil, errImageBodyMissing
+}
+
+func getPeerImage(ctx context.Context, target string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := peerClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get peer image: %s: %s", target, res.Status)
+	}
+	return io.ReadAll(res.Body)
+}
+
 func save(dir, id string, data []byte) error {
 	path, err := imageFilePath(dir, id)
 	if err != nil {
@@ -103,7 +193,7 @@ func (s *PostImageStore) Clear() error {
 	return os.MkdirAll(s.runtimeDir, 0o755)
 }
 
-// Load は画像のバイト列をローカルから返す。無ければ DB から読んで置く。
+// Load は画像のバイト列をローカルから返す。無ければ DB から、DB の data が空ならピアから読んで置く。
 // 画像の行が無ければ sql.ErrNoRows を返す。取得してよいかは呼び出し側が確認する。
 func (s *PostImageStore) Load(ctx context.Context, db sqlx.QueryerContext, id string) ([]byte, error) {
 	data, err := s.Read(id)
@@ -115,6 +205,9 @@ func (s *PostImageStore) Load(ctx context.Context, db sqlx.QueryerContext, id st
 	}
 	if err := sqlx.GetContext(ctx, db, &data, `SELECT data FROM image_objects WHERE id = $1`, preparedQuery, id); err != nil {
 		return nil, err
+	}
+	if len(data) == 0 {
+		return s.pullFromPeers(ctx, id)
 	}
 	// 置けなくても次の取得で DB から読み直す。
 	_ = s.Save(id, data)
@@ -178,6 +271,14 @@ func (s *PostImageStore) Bytes(ctx context.Context, db *sqlx.DB, ids []string) (
 	if err := s.loadFromDB(ctx, db, missing, s.runtimeDir, out); err != nil {
 		return nil, err
 	}
+	for _, id := range missing {
+		if _, ok := out[id]; ok {
+			continue
+		}
+		if data, err := s.pullFromPeers(ctx, id); err == nil {
+			out[id] = data
+		}
+	}
 	return out, nil
 }
 
@@ -198,6 +299,10 @@ func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []stri
 		var data []byte
 		if err := rows.Scan(&id, &data); err != nil {
 			return err
+		}
+		// 空の data は本体がアプリサーバのローカルにある行で、JPEG ではない。
+		if len(data) == 0 {
+			continue
 		}
 		s.mu.Lock()
 		err := save(dir, id, data)
@@ -234,6 +339,34 @@ func purgeImageCacheHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)
+	}
+}
+
+func putImageBlobHandler(h *HandlerContext) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		id := c.Param("imageId")
+		data, err := io.ReadAll(c.Request().Body)
+		if err != nil {
+			return err
+		}
+		if !validImageFileID(id) || len(data) == 0 {
+			return c.NoContent(http.StatusBadRequest)
+		}
+		if err := h.PostImages.saveIfAbsent(id, data); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	}
+}
+
+// getImageBlobHandler はローカルのファイルだけを返す。DB やピアを見に行くとピア同士で呼び合うため。
+func getImageBlobHandler(h *HandlerContext) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		data, err := h.PostImages.Read(c.Param("imageId"))
+		if err != nil {
+			return c.NoContent(http.StatusNotFound)
+		}
+		return c.Blob(http.StatusOK, "image/jpeg", data)
 	}
 }
 

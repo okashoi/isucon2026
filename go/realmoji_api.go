@@ -60,6 +60,8 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
+		imageID := uuid.NewString()
+		imageBody := h.PostImages.Replicate(ctx, imageID, data)
 		post, err := getPost(ctx, h.DB, input.PostID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
@@ -85,8 +87,7 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		if _, err := tx.ExecContext(ctx, `UPDATE realmojis SET replaced_at=clock_timestamp() WHERE post_id=$1 AND reactor_id=$2 AND replaced_at IS NULL AND deleted_at IS NULL`, post.ID, actor); err != nil {
 			return err
 		}
-		imageID := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type) VALUES($1,$2,$3,'image/jpeg')`, preparedQuery, imageID, actor, data); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type) VALUES($1,$2,$3,'image/jpeg')`, preparedQuery, imageID, actor, imageBody()); err != nil {
 			return err
 		}
 		id := uuid.NewString()
@@ -104,8 +105,6 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		// 失敗しても取得はファイルが無い画像だけ DB から読む。
-		_ = h.PostImages.Save(imageID, data)
 		return c.JSON(http.StatusCreated, newRealMojiResponse(reaction, user))
 	}
 }
