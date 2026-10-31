@@ -31,7 +31,7 @@ func GetSession(c *echo.Context) *Session {
 	return sess
 }
 
-func getSessionFromHeader(c *echo.Context, db *sqlx.DB) (*Session, error) {
+func getSessionFromHeader(c *echo.Context, h *HandlerContext) (*Session, error) {
 	authHeader := c.Request().Header.Get(echo.HeaderAuthorization)
 	if authHeader == "" {
 		return nil, nil
@@ -45,8 +45,12 @@ func getSessionFromHeader(c *echo.Context, db *sqlx.DB) (*Session, error) {
 
 	tokenHashBytes := sha256.Sum256([]byte(token))
 	tokenHash := hex.EncodeToString(tokenHashBytes[:])
+	if session, ok := h.Sessions.Get(tokenHash); ok {
+		return session, nil
+	}
+	generation := h.Sessions.Generation()
 	var session Session
-	err := db.GetContext(c.Request().Context(), &session, `
+	err := h.DB.GetContext(c.Request().Context(), &session, `
 		SELECT s.user_id, s.token_hash, s.created_at, u.region
 		FROM login_sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = $1
@@ -58,13 +62,16 @@ func getSessionFromHeader(c *echo.Context, db *sqlx.DB) (*Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
+	if session.Region == h.Config.Region {
+		h.Sessions.Add(generation, session)
+	}
 	return &session, nil
 }
 
 func SessionMiddleware(handlerContext *HandlerContext, authRequired bool) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
-			session, err := getSessionFromHeader(c, handlerContext.DB)
+			session, err := getSessionFromHeader(c, handlerContext)
 			if err != nil {
 				return err
 			}
@@ -77,31 +84,32 @@ func SessionMiddleware(handlerContext *HandlerContext, authRequired bool) echo.M
 	}
 }
 
-func InvalidateLoginSession(db *sqlx.DB, userID string, tokenHash string) error {
+// InvalidateLoginSession は users 行のロックの下で読んだ所属リージョンを返す。
+func InvalidateLoginSession(db *sqlx.DB, userID string, tokenHash string) (string, error) {
 	tx, err := db.Beginx()
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return "", fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	var lockedUserID string
-	if err := tx.Get(&lockedUserID, `SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
-		return fmt.Errorf("failed to lock user: %w", err)
+	var region string
+	if err := tx.Get(&region, `SELECT region FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
+		return "", fmt.Errorf("failed to lock user: %w", err)
 	}
 
 	if _, err := tx.Exec(`
 		UPDATE login_sessions
 		SET active = false, invalidated_at = clock_timestamp(), reason = 'logout'
-		WHERE user_id = $1 AND active = true AND token_hash = $2	
+		WHERE user_id = $1 AND active = true AND token_hash = $2
 	`, userID, tokenHash); err != nil {
-		return fmt.Errorf("failed to invalidate sessions: %w", err)
+		return "", fmt.Errorf("failed to invalidate sessions: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return "", fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	return nil
+	return region, nil
 }
 
 // replaceLoginSession は有効なセッションを新しいものに置き換えてトークンを返す。

@@ -14,9 +14,10 @@ import (
 const maxDBConns = 100
 
 type HandlerContext struct {
-	DB     *sqlx.DB
-	Config *Config
-	IPBans *IPBanList
+	DB       *sqlx.DB
+	Config   *Config
+	IPBans   *IPBanList
+	Sessions *SessionCache
 }
 
 func NewServer(config *Config) *echo.Echo {
@@ -43,11 +44,16 @@ func NewServer(config *Config) *echo.Echo {
 	}
 
 	handlerContext := &HandlerContext{
-		DB:     db,
-		Config: config,
-		IPBans: &IPBanList{},
+		DB:       db,
+		Config:   config,
+		IPBans:   &IPBanList{},
+		Sessions: NewSessionCache(),
 	}
 	e.Use(IPBanMiddleware(handlerContext))
+
+	// 他のアプリサーバが :8080 へ直接送る。nginx は /api/ だけを転送するので、ルーターの公開先からは届かない。
+	e.DELETE("/internal/session-cache", purgeAllSessionsHandler(handlerContext))
+	e.DELETE("/internal/session-cache/:userId", purgeUserSessionHandler(handlerContext))
 
 	e.POST("/api/initialize", initializeHandler(handlerContext))
 	e.POST("/api/auth/register", registerHandler(handlerContext))

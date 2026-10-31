@@ -147,6 +147,9 @@ func loginHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		if err := purgeUserSession(ctx, h, user.Region, user.ID); err != nil {
+			return err
+		}
 		return c.JSON(http.StatusOK, loginResponse{Token: token, User: newSessionUserResponse(user)})
 	}
 }
@@ -157,7 +160,11 @@ func logoutHandler(h *HandlerContext) echo.HandlerFunc {
 		if session == nil {
 			return NewAPIError(http.StatusUnauthorized, "invalid_session")
 		}
-		if err := InvalidateLoginSession(h.DB, session.UserID, session.TokenHash); err != nil {
+		region, err := InvalidateLoginSession(h.DB, session.UserID, session.TokenHash)
+		if err != nil {
+			return err
+		}
+		if err := purgeUserSession(c.Request().Context(), h, region, session.UserID); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)
@@ -203,8 +210,8 @@ func updateMeHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
+		var currentRegion string
 		if input.Region != nil {
-			var currentRegion string
 			if err := tx.GetContext(ctx, &currentRegion, `SELECT region FROM users WHERE id = $1 FOR NO KEY UPDATE`, session.UserID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return NewAPIError(http.StatusNotFound, "account_not_found")
@@ -241,6 +248,11 @@ func updateMeHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		if err := tx.Commit(); err != nil {
 			return err
+		}
+		if input.Region != nil && *input.Region != currentRegion {
+			if err := purgeUserSession(ctx, h, currentRegion, session.UserID); err != nil {
+				return err
+			}
 		}
 		return c.JSON(http.StatusOK, updateMeResponse(newGetMeResponse(user)))
 	}

@@ -42,6 +42,9 @@ func deleteAccountHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		if err := purgeUserSession(ctx, h, locked.Region, userID); err != nil {
+			return err
+		}
 		return c.NoContent(http.StatusNoContent)
 	}
 }
