@@ -89,20 +89,16 @@ func registerHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		// ユーザー名が一意である必要があります。
-		if _, err := tx.ExecContext(ctx, `LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		// 同じリージョンの在籍変更と投稿期間開始を直列化する。ユーザー名の一意性は UNIQUE 制約が持つ。
+		if err := lockRegionMemberships(ctx, tx, input.Region); err != nil {
 			return err
-		}
-		var exists bool
-		if err := tx.GetContext(ctx, &exists, `SELECT EXISTS(SELECT 1 FROM users WHERE username = $1)`, input.Username); err != nil {
-			return err
-		}
-		if exists {
-			return NewAPIError(http.StatusConflict, "username_taken")
 		}
 		userID := uuid.NewString()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO users (id, username, secret_key_hash, display_name, region) VALUES ($1, $2, $3, $4, $5)`,
 			userID, input.Username, hex.EncodeToString(hash[:]), input.DisplayName, input.Region); err != nil {
+			if isUniqueViolation(err) {
+				return NewAPIError(http.StatusConflict, "username_taken")
+			}
 			return err
 		}
 		user, err := getUser(ctx, tx, userID)
@@ -207,6 +203,20 @@ func updateMeHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
+		if input.Region != nil {
+			var currentRegion string
+			if err := tx.GetContext(ctx, &currentRegion, `SELECT region FROM users WHERE id = $1 FOR NO KEY UPDATE`, session.UserID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return NewAPIError(http.StatusNotFound, "account_not_found")
+				}
+				return err
+			}
+			if currentRegion != *input.Region {
+				if err := lockRegionMemberships(ctx, tx, currentRegion, *input.Region); err != nil {
+					return err
+				}
+			}
+		}
 		if input.DisplayName != nil {
 			if _, err := tx.ExecContext(ctx, `UPDATE users SET display_name = $2, updated_at = clock_timestamp() WHERE id = $1`, session.UserID, *input.DisplayName); err != nil {
 				return err
