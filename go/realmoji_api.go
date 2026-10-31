@@ -86,7 +86,16 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		imageID := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type) VALUES($1,$2,$3,'image/jpeg')`, preparedQuery, imageID, actor, data); err != nil {
+		if err := h.PostImages.SaveOrigin(imageID, data); err != nil {
+			return err
+		}
+		keepImage := false
+		defer func() {
+			if !keepImage {
+				h.PostImages.Remove(imageID)
+			}
+		}()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type,origin_region) VALUES($1,$2,''::bytea,'image/jpeg',$3)`, preparedQuery, imageID, actor, h.Config.Region); err != nil {
 			return err
 		}
 		id := uuid.NewString()
@@ -104,8 +113,7 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		// 失敗しても取得はファイルが無い画像だけ DB から読む。
-		_ = h.PostImages.Save(imageID, data)
+		keepImage = true
 		return c.JSON(http.StatusCreated, newRealMojiResponse(reaction, user))
 	}
 }

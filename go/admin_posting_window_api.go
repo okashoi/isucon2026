@@ -75,6 +75,9 @@ func openPostingWindowHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
+		notifyPostingWindowPeers(ctx, h, postingWindowEvent{
+			ID: window.ID, Region: window.Region, StartsAt: window.StartsAt,
+		})
 		return c.JSON(http.StatusCreated, openPostingWindowResponse{
 			ID: window.ID, Region: window.Region, LocalDate: window.LocalDate.Format(time.DateOnly),
 			StartsAt: window.StartsAt, OnTimeDeadline: window.OnTimeDeadline,

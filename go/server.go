@@ -10,8 +10,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// アプリ3台の primary 向け合計が s4 の max_connections（300）に収まるようにする。
-const maxDBConns = 100
+// アプリ3台の primary 向け合計が s4 の max_connections（300）に、superuser 予約分を残して収まるようにする。
+const maxDBConns = 80
 
 type HandlerContext struct {
 	DB         *sqlx.DB // primary（書き込み・TX・initialize）
@@ -21,6 +21,7 @@ type HandlerContext struct {
 	Abuse      *AbuseDetector
 	Sessions   *SessionCache
 	PostImages *PostImageStore
+	Windows    *PostingWindowHub
 }
 
 func openDB(dsn string) *sqlx.DB {
@@ -66,6 +67,7 @@ func NewServer(config *Config) *echo.Echo {
 		Abuse:      NewAbuseDetector(),
 		Sessions:   NewSessionCache(),
 		PostImages: postImages,
+		Windows:    NewPostingWindowHub(),
 	}
 	e.Use(IPBanMiddleware(handlerContext))
 	e.Use(AbuseBanMiddleware(handlerContext))
@@ -78,6 +80,7 @@ func NewServer(config *Config) *echo.Echo {
 	e.GET("/internal/images/:imageId", getOriginImageHandler(handlerContext))
 	// make post-images/sync が asia1 へ送る。
 	e.POST("/internal/post-image-cache", fillPostImageCacheHandler(handlerContext))
+	e.POST("/internal/posting-window-notify", notifyPostingWindowHandler(handlerContext))
 
 	e.POST("/api/initialize", initializeHandler(handlerContext))
 	e.POST("/api/auth/register", registerHandler(handlerContext))

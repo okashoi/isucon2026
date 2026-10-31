@@ -2,7 +2,6 @@ package isureal
 
 import (
 	"archive/zip"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -42,9 +41,12 @@ func exportPostsHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 
-		var body bytes.Buffer
-		writer := zip.NewWriter(&body)
-		defer writer.Close()
+		c.Response().Header().Set(echo.HeaderContentDisposition, `attachment; filename="isureal-posts.zip"`)
+		c.Response().Header().Set(echo.HeaderCacheControl, "no-store")
+		c.Response().Header().Set(echo.HeaderContentType, "application/zip")
+		c.Response().WriteHeader(http.StatusOK)
+
+		writer := zip.NewWriter(c.Response())
 		items := make([]exportPostResponse, 0, len(posts))
 		for _, post := range posts {
 			data, ok := images[post.ImageID]
@@ -68,11 +70,6 @@ func exportPostsHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := json.NewEncoder(manifest).Encode(items); err != nil {
 			return err
 		}
-		if err := writer.Close(); err != nil {
-			return err
-		}
-		c.Response().Header().Set(echo.HeaderContentDisposition, `attachment; filename="isureal-posts.zip"`)
-		c.Response().Header().Set(echo.HeaderCacheControl, "no-store")
-		return c.Blob(http.StatusOK, "application/zip", body.Bytes())
+		return writer.Close()
 	}
 }

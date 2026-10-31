@@ -60,12 +60,14 @@ func getRelationshipsHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
+		// 友達関係は書き込み直後のリージョン跨ぎ読み取りがあるので Primary を見る。
+		db := h.DB
 		var records []struct {
 			ID        string    `db:"id"`
 			UpdatedAt time.Time `db:"updated_at"`
 			User      User      `db:"user"`
 		}
-		if err := h.ReadDB.SelectContext(ctx, &records, `
+		if err := db.SelectContext(ctx, &records, `
    SELECT relations.id, relations.updated_at, `+userColumnsAs("u", "user")+`
    FROM (`+query+`) relations
    JOIN users u ON u.status = 'active'

@@ -1,6 +1,7 @@
 package isureal
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -19,15 +20,37 @@ type getNotificationsResponse struct {
 	CreatedAt       time.Time `json:"createdAt"`
 }
 
-type notificationPoll struct {
-	Region          string     `db:"region"`
-	PostingWindowID *string    `db:"posting_window_id"`
-	StartsAt        *time.Time `db:"starts_at"`
-}
-
 // notificationID は通知を行として持たないので、投稿期間と利用者の組から決定的に作る。
 func notificationID(postingWindowID, userID string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(postingWindowID+"/"+userID)).String()
+}
+
+func writeNotificationEvent(c *echo.Context, userID string, event postingWindowEvent) error {
+	data, err := json.Marshal(getNotificationsResponse{
+		ID:              notificationID(event.ID, userID),
+		PostingWindowID: event.ID,
+		Region:          event.Region,
+		CreatedAt:       event.StartsAt,
+	})
+	if err != nil {
+		return err
+	}
+	response := c.Response()
+	if _, err := fmt.Fprintf(response, "data: %s\n\n", data); err != nil {
+		return err
+	}
+	return http.NewResponseController(response).Flush()
+}
+
+func notificationUserActive(ctx context.Context, h *HandlerContext, userID, region string) (bool, error) {
+	row := struct {
+		Region string `db:"region"`
+		Status string `db:"status"`
+	}{}
+	if err := h.ReadDB.GetContext(ctx, &row, `SELECT region, status FROM users WHERE id = $1`, userID); err != nil {
+		return false, err
+	}
+	return row.Status == "active" && row.Region == region, nil
 }
 
 func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
@@ -46,46 +69,68 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := controller.Flush(); err != nil {
 			return nil
 		}
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
+
+		wait := h.Windows.Subscribe(session.Region)
+		defer h.Windows.Unsubscribe(session.Region, wait)
+
+		// 購読開始前に始まった窓を取りこぼさない。
+		var existing postingWindowEvent
+		err := h.ReadDB.GetContext(ctx, &existing, `
+   SELECT w.id, w.region, w.starts_at
+   FROM users u
+   JOIN posting_windows w ON w.region = u.region AND w.ended_at IS NULL AND w.starts_at > $2
+   WHERE u.id = $1 AND u.status = 'active'
+   LIMIT 1
+  `, userID, connectedAt)
+		if err == nil {
+			if writeErr := writeNotificationEvent(c, userID, existing); writeErr != nil {
+				return nil
+			}
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			c.Logger().Error("failed to get notification", "error", err)
+			return nil
+		}
+
+		statusTick := time.NewTicker(5 * time.Second)
+		defer statusTick.Stop()
 		for {
-			var poll notificationPoll
-			err := h.ReadDB.GetContext(ctx, &poll, `
-    SELECT u.region, w.id AS posting_window_id, w.starts_at
-    FROM users u
-    LEFT JOIN posting_windows w ON w.region = u.region AND w.ended_at IS NULL AND w.starts_at > $2
-    WHERE u.id = $1 AND u.status = 'active'
-   `, userID, connectedAt)
-			if err != nil {
-				if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
-					c.Logger().Error("failed to get notification", "error", err)
-				}
-				return nil
-			}
-			if poll.Region != session.Region {
-				return nil
-			}
-			if poll.PostingWindowID != nil {
-				data, err := json.Marshal(getNotificationsResponse{
-					ID:              notificationID(*poll.PostingWindowID, userID),
-					PostingWindowID: *poll.PostingWindowID,
-					Region:          poll.Region,
-					CreatedAt:       *poll.StartsAt,
-				})
-				if err != nil {
-					c.Logger().Error("failed to encode notification", "error", err)
-					return nil
-				}
-				if _, err := fmt.Fprintf(response, "data: %s\n\n", data); err != nil {
-					return nil
-				}
-				_ = controller.Flush()
-				return nil
-			}
 			select {
 			case <-ctx.Done():
 				return nil
-			case <-ticker.C:
+			case event, ok := <-wait:
+				if !ok {
+					return nil
+				}
+				if !event.StartsAt.After(connectedAt) || event.Region != session.Region {
+					continue
+				}
+				okActive, err := notificationUserActive(ctx, h, userID, session.Region)
+				if err != nil {
+					if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
+						c.Logger().Error("failed to get notification user", "error", err)
+					}
+					return nil
+				}
+				if !okActive {
+					return nil
+				}
+				if writeErr := writeNotificationEvent(c, userID, event); writeErr != nil {
+					return nil
+				}
+				return nil
+			case <-statusTick.C:
+				okActive, err := notificationUserActive(ctx, h, userID, session.Region)
+				if err != nil {
+					if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
+						c.Logger().Error("failed to get notification user", "error", err)
+					}
+					return nil
+				}
+				if !okActive {
+					return nil
+				}
 			}
 		}
 	}
