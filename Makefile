@@ -1,4 +1,4 @@
-APPNAME := isuhoge-go.service
+APPNAME := isureal-go.service
 
 .PHONY: *
 gogo: stop-services build logs/clear start-services
@@ -10,7 +10,7 @@ stop-services:
 	# ssh isucon-s2 "sudo systemctl stop mysql"
 
 build:
-	__FIXME__
+	cd go && make
 	# cd go && make
 	# cd go && go build -o isuhoge
 
