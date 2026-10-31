@@ -27,3 +27,17 @@ func TestPostingWindowHubPublishDelivers(t *testing.T) {
 		t.Fatalf("current %#v ok=%v", cur, ok)
 	}
 }
+
+func TestHubWindowAfterConnectIgnoresStale(t *testing.T) {
+	hub := NewPostingWindowHub()
+	connected := time.Unix(10, 0).UTC()
+	hub.SetCurrent(postingWindowEvent{ID: "old", Region: "asia", StartsAt: connected.Add(-time.Second)})
+	if _, ok := hubWindowAfterConnect(hub, "asia", connected); ok {
+		t.Fatal("window started before connect must not notify")
+	}
+	hub.SetCurrent(postingWindowEvent{ID: "new", Region: "asia", StartsAt: connected.Add(time.Second)})
+	got, ok := hubWindowAfterConnect(hub, "asia", connected)
+	if !ok || got.ID != "new" {
+		t.Fatalf("got %#v ok=%v", got, ok)
+	}
+}
