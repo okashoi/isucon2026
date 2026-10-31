@@ -2,6 +2,8 @@
 hosts:
   s1: isucon-s1
   s2: isucon-s2
+  s3: isucon-s3
+  s4: isucon-s4
 
 # Common paths for all hosts. Files and directories are both supported.
 includes:
@@ -9,20 +11,22 @@ includes:
   - /etc/sysctl.d
   - /etc/security/limits.conf
   - /etc/hosts
+  # nginx (sites-enabled は symlink。実体は sites-available)
+  - /etc/nginx/nginx.conf
+  - /etc/nginx/sites-enabled
+  - /etc/nginx/sites-available
+  - /etc/nginx/conf.d
+  # PostgreSQL 16
+  - /etc/postgresql/16/main
 
 excludes:
   - "*.bak"
   - "*.sock"
 
-# Extra paths per host. Use this when roles differ between servers.
-host_includes:
-  s1:
-    - /etc/nginx/nginx.conf
-    - /etc/mysql/mysql.conf.d/mysqld.cnf
-  s2:
-    - /etc/systemd/system
-    - /etc/nginx/sites-enabled
-
-host_excludes:
-  s1:
-    - "*.tmp"
+# Extra paths per host when roles differ, e.g.:
+# host_includes:
+#   s1:
+#     - /etc/systemd/system
+# host_excludes:
+#   s1:
+#     - "*.tmp"

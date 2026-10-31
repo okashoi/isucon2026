@@ -6,8 +6,8 @@ gogo: stop-services build logs/clear start-services
 stop-services:
 	sudo systemctl stop nginx
 	sudo systemctl stop $(APPNAME)
-	sudo systemctl stop mysql
-	# ssh isucon-s2 "sudo systemctl stop mysql"
+	# sudo systemctl stop postgresql
+	ssh isucon-s4 "sudo systemctl stop postgresql"
 
 build:
 	cd go && make
@@ -26,15 +26,14 @@ logs/clear:
 	sudo journalctl --rotate && sudo journalctl --vacuum-size=1K
 	sudo truncate --size 0 /var/log/nginx/access.log
 	sudo truncate --size 0 /var/log/nginx/error.log
-	sudo truncate --size 0 /var/log/mysql/mysql-slow.log && sudo chmod 666 /var/log/mysql/mysql-slow.log
-	sudo truncate --size 0 /var/log/mysql/error.log
-	# ssh isucon-s2 "sudo truncate --size 0 /var/log/mysql/mysql-slow.log && chmod 666 /var/log/mysql/mysql-slow.log"
-	# ssh isucon-s2 "sudo truncate --size 0 /var/log/mysql/error.log"
+	# sudo truncate --size 0 /var/log/mysql/mysql-slow.log && sudo chmod 666 /var/log/mysql/mysql-slow.log
+	# sudo truncate --size 0 /var/log/mysql/error.log
+	ssh isucon-s4 "sudo -u postgres truncate -s 0 /var/log/postgresql/postgresql-16-main.log"
 
 start-services:
 	sudo systemctl daemon-reload
-	# ssh isucon-s2 "sudo systemctl start mysql"
-	sudo systemctl start mysql
+	ssh isucon-s4 "sudo systemctl start postgresql"
+	# sudo systemctl start postgresql
 	sudo systemctl start $(APPNAME)
 	sudo systemctl start nginx
 
