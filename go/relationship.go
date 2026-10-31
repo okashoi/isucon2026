@@ -25,9 +25,16 @@ func getFriendRequest(ctx context.Context, db sqlx.QueryerContext, id string) (F
 	return request, err
 }
 
-func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string) (*sqlx.Tx, error) {
+func validateRelationshipTarget(actor, target string) error {
 	if actor == target || target == "" {
-		return nil, NewAPIError(http.StatusBadRequest, "invalid_relationship")
+		return NewAPIError(http.StatusBadRequest, "invalid_relationship")
+	}
+	return nil
+}
+
+func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string) (*sqlx.Tx, error) {
+	if err := validateRelationshipTarget(actor, target); err != nil {
+		return nil, err
 	}
 	tx, err := db.BeginTxx(ctx, nil)
 	if err != nil {
@@ -43,6 +50,19 @@ func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string)
 		return nil, NewAPIError(http.StatusNotFound, "relationship_not_found")
 	}
 	return tx, nil
+}
+
+type createFriendRequestResult struct {
+	Result     string     `db:"result"`
+	RelationID *string    `db:"relation_id"`
+	Status     *string    `db:"relation_status"`
+	UpdatedAt  *time.Time `db:"relation_updated_at"`
+}
+
+func createFriendRequest(ctx context.Context, db sqlx.QueryerContext, actor, target string) (createFriendRequestResult, error) {
+	var result createFriendRequestResult
+	err := sqlx.GetContext(ctx, db, &result, `SELECT result, relation_id, relation_status, relation_updated_at FROM create_friend_request($1, $2, $3::bigint)`, actor, target, userPairAdvisoryKey(actor, target))
+	return result, err
 }
 
 func isBlocked(ctx context.Context, db sqlx.QueryerContext, actor, target string) (bool, error) {
