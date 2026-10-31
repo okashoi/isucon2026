@@ -10,6 +10,9 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+// アプリサーバ3台の合計が PostgreSQL の max_connections = 100 に収まるようにする。
+const maxDBConns = 30
+
 type HandlerContext struct {
 	DB     *sqlx.DB
 	Config *Config
@@ -31,7 +34,9 @@ func NewServer(config *Config) *echo.Echo {
 	if err != nil {
 		panic("failed to open database: " + err.Error())
 	}
-	db.SetMaxOpenConns(30)
+	db.SetMaxOpenConns(maxDBConns)
+	// 接続の確立は WAN 越しの往復を要するため、確立済みの接続を閉じずに使い回す。
+	db.SetMaxIdleConns(maxDBConns)
 	err = db.Ping()
 	if err != nil {
 		panic("failed to ping database: " + err.Error())
