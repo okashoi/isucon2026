@@ -8,7 +8,11 @@
 #   sudo ./mybin/pprotein/pprotein-setup.sh nginx on|off
 #   sudo ./mybin/pprotein/pprotein-setup.sh mysql on|off
 #   sudo ./mybin/pprotein/pprotein-setup.sh agent install
-#   ./mybin/pprotein/pprotein-setup.sh targets --host s1=IP [--host s2=IP] [--app-pprof s1]
+#   ./mybin/pprotein/pprotein-setup.sh targets \
+#     --host s1=IP --host s2=IP --host s3=IP --host s4=IP \
+#     --app-pprof s1 --app-pprof s2 --app-pprof s3 \
+#     --no-pprof s4 --no-httplog s4 \
+#     --no-slowlog s1 --no-slowlog s2 --no-slowlog s3
 #   ./mybin/pprotein/pprotein-setup.sh alp --group '^/api/items/[^/]+$' [--group ...]
 #   ./mybin/pprotein/pprotein-setup.sh alp --groups-file matching_groups.txt
 #   ./mybin/pprotein/pprotein-setup.sh verify [IP...]
@@ -33,7 +37,7 @@ MYSQL_SERVICE=${MYSQL_SERVICE:-mysql}
 DURATION=${DURATION:-10}
 
 usage() {
-  sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'
+  awk 'NR < 3 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
   exit 2
 }
 
@@ -236,6 +240,9 @@ cmd_targets() {
 
   hosts=""
   app_pprof=""
+  no_pprof=""
+  no_httplog=""
+  no_slowlog=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --host)
@@ -246,6 +253,18 @@ cmd_targets() {
         shift
         app_pprof="${app_pprof} ${1:-}"
         ;;
+      --no-pprof)
+        shift
+        no_pprof="${no_pprof} ${1:-}"
+        ;;
+      --no-httplog)
+        shift
+        no_httplog="${no_httplog} ${1:-}"
+        ;;
+      --no-slowlog)
+        shift
+        no_slowlog="${no_slowlog} ${1:-}"
+        ;;
       *)
         echo "不明な引数: $1" >&2
         exit 2
@@ -255,26 +274,32 @@ cmd_targets() {
   done
   hosts=$(echo "$hosts" | sed 's/^ *//')
   if [ -z "$hosts" ]; then
-    echo "使い方: $0 targets --host label=ip [--host label=ip] [--app-pprof label]" >&2
+    echo "使い方: $0 targets --host label=ip [--host label=ip] [--app-pprof label] [--no-pprof label] [--no-httplog label] [--no-slowlog label]" >&2
     exit 2
   fi
 
-  body=$(HOSTS="$hosts" APP_PPROF="$app_pprof" DURATION="$DURATION" python3 - <<'PY'
+  body=$(HOSTS="$hosts" APP_PPROF="$app_pprof" NO_PPROF="$no_pprof" NO_HTTPLOG="$no_httplog" NO_SLOWLOG="$no_slowlog" DURATION="$DURATION" python3 - <<'PY'
 import json, os
 hosts = os.environ["HOSTS"].split()
 app = set(os.environ.get("APP_PPROF", "").split())
+no_pprof = set(os.environ.get("NO_PPROF", "").split())
+no_httplog = set(os.environ.get("NO_HTTPLOG", "").split())
+no_slowlog = set(os.environ.get("NO_SLOWLOG", "").split())
 duration = int(os.environ["DURATION"])
 out = []
 for spec in hosts:
     if "=" not in spec:
         raise SystemExit(f"bad --host {spec!r}, want label=ip")
     label, ip = spec.split("=", 1)
-    pprof_port = 19001 if label in app else 19000
-    if label not in app:
-        print(f"[NOTE] {label}: app pprof なし → agent :19000 を pprof に使用", file=__import__("sys").stderr, flush=True)
-    out.append({"Type": "pprof", "Label": label, "URL": f"http://{ip}:{pprof_port}/debug/pprof/profile", "Duration": duration})
-    out.append({"Type": "httplog", "Label": label, "URL": f"http://{ip}:19000/debug/log/httplog", "Duration": duration})
-    out.append({"Type": "slowlog", "Label": label, "URL": f"http://{ip}:19000/debug/log/slowlog", "Duration": duration})
+    if label not in no_pprof:
+        pprof_port = 19001 if label in app else 19000
+        if label not in app:
+            print(f"[NOTE] {label}: app pprof なし → agent :19000 を pprof に使用", file=__import__("sys").stderr, flush=True)
+        out.append({"Type": "pprof", "Label": label, "URL": f"http://{ip}:{pprof_port}/debug/pprof/profile", "Duration": duration})
+    if label not in no_httplog:
+        out.append({"Type": "httplog", "Label": label, "URL": f"http://{ip}:19000/debug/log/httplog", "Duration": duration})
+    if label not in no_slowlog:
+        out.append({"Type": "slowlog", "Label": label, "URL": f"http://{ip}:19000/debug/log/slowlog", "Duration": duration})
 print(json.dumps(out))
 PY
 )
