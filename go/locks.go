@@ -89,6 +89,7 @@ func lockUserPair(ctx context.Context, tx *sqlx.Tx, a, b string) (bool, error) {
 	return len(ids) == 2, err
 }
 
+// userPairAdvisoryKey を変えるときは sql/reset.sql の user_pair_advisory_key も同じ値になるように変える。
 func userPairAdvisoryKey(a, b string) int64 {
 	if a > b {
 		a, b = b, a

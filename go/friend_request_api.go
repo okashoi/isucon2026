@@ -1,8 +1,6 @@
 package isureal
 
 import (
-	"database/sql"
-	"errors"
 	"net/http"
 	"time"
 
@@ -67,52 +65,20 @@ func transitionFriendRequestHandler(h *HandlerContext) echo.HandlerFunc {
 		default:
 			return NewAPIError(http.StatusForbidden, "relationship_action_forbidden")
 		}
-		ctx := c.Request().Context()
-		actor := GetSession(c).UserID
-		request, err := getFriendRequest(ctx, h.DB, input.RequestID)
-		if errors.Is(err, sql.ErrNoRows) {
+		transitioned, err := transitionFriendRequest(c.Request().Context(), h.DB, GetSession(c).UserID, input.RequestID, status)
+		if err != nil {
+			return err
+		}
+		switch transitioned.Result {
+		case "not_found":
 			return NewAPIError(http.StatusNotFound, "relationship_not_found")
-		}
-		if err != nil {
-			return err
-		}
-		if (status == "cancelled" && actor != request.RequesterID) || (status != "cancelled" && actor != request.RecipientID) {
+		case "forbidden":
 			return NewAPIError(http.StatusForbidden, "relationship_action_forbidden")
+		case "conflict":
+			return NewAPIError(http.StatusConflict, "relationship_conflict")
+		case "invalid":
+			return NewAPIError(http.StatusBadRequest, "invalid_relationship")
 		}
-		tx, err := beginRelationshipTx(ctx, h.DB, request.RequesterID, request.RecipientID)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		request, err = getFriendRequest(ctx, tx, input.RequestID)
-		if err != nil {
-			return err
-		}
-		if request.Status != "pending" {
-			return NewAPIError(http.StatusForbidden, "relationship_action_forbidden")
-		}
-		if status == "accepted" {
-			blocked, err := isBlocked(ctx, tx, request.RequesterID, request.RecipientID)
-			if err != nil {
-				return err
-			}
-			if blocked {
-				return NewAPIError(http.StatusConflict, "relationship_conflict")
-			}
-			if err := insertFriendship(ctx, tx, request); err != nil {
-				return err
-			}
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE friend_requests SET status=$2, updated_at=clock_timestamp() WHERE id=$1`, request.ID, status); err != nil {
-			return err
-		}
-		request, err = getFriendRequest(ctx, tx, request.ID)
-		if err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		return c.JSON(http.StatusOK, transitionFriendRequestResponse{RelationID: request.ID, Status: request.Status, UpdatedAt: request.UpdatedAt})
+		return c.JSON(http.StatusOK, transitionFriendRequestResponse{RelationID: *transitioned.RelationID, Status: *transitioned.Status, UpdatedAt: *transitioned.UpdatedAt})
 	}
 }

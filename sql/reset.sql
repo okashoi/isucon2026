@@ -127,4 +127,165 @@ BEGIN
 END;
 $$;
 
+-- Go の userPairAdvisoryKey と同じ値を返す。
+CREATE OR REPLACE FUNCTION user_pair_advisory_key(p_a text, p_b text) RETURNS bigint LANGUAGE sql IMMUTABLE AS $$
+  SELECT ('x' || encode(substring(
+    sha256(convert_to(LEAST(p_a COLLATE "C", p_b COLLATE "C"), 'UTF8') || '\x00'::bytea || convert_to(GREATEST(p_a COLLATE "C", p_b COLLATE "C"), 'UTF8'))
+    FROM 1 FOR 8), 'hex'))::bit(64)::bigint;
+$$;
+
+-- p_status は accepted / rejected / cancelled。
+-- result は ok / not_found / forbidden / conflict / invalid で、ok のときだけ relation_* が入る。
+CREATE OR REPLACE FUNCTION transition_friend_request(
+  p_actor text,
+  p_request_id text,
+  p_status text,
+  OUT result text,
+  OUT relation_id text,
+  OUT relation_status text,
+  OUT relation_updated_at timestamptz
+) LANGUAGE plpgsql AS $$
+DECLARE
+  v_requester_id text;
+  v_recipient_id text;
+  v_active_users integer;
+  v_current_status text;
+BEGIN
+  SELECT requester_id, recipient_id INTO v_requester_id, v_recipient_id FROM friend_requests WHERE id = p_request_id;
+  IF NOT FOUND THEN
+    result := 'not_found';
+    RETURN;
+  END IF;
+  IF (p_status = 'cancelled' AND p_actor <> v_requester_id) OR (p_status <> 'cancelled' AND p_actor <> v_recipient_id) THEN
+    result := 'forbidden';
+    RETURN;
+  END IF;
+  IF v_requester_id = v_recipient_id THEN
+    result := 'invalid';
+    RETURN;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(user_pair_advisory_key(v_requester_id, v_recipient_id));
+
+  SELECT count(*) INTO v_active_users FROM (
+    SELECT 1 FROM users
+    WHERE id IN (v_requester_id, v_recipient_id) AND status = 'active'
+    ORDER BY id
+    FOR KEY SHARE
+  ) AS locked;
+  IF v_active_users <> 2 THEN
+    result := 'not_found';
+    RETURN;
+  END IF;
+
+  SELECT status INTO STRICT v_current_status FROM friend_requests WHERE id = p_request_id;
+  IF v_current_status <> 'pending' THEN
+    result := 'forbidden';
+    RETURN;
+  END IF;
+
+  IF p_status = 'accepted' THEN
+    IF EXISTS (
+      SELECT 1 FROM block_relations
+      WHERE (blocker_id = v_requester_id AND blocked_id = v_recipient_id) OR (blocker_id = v_recipient_id AND blocked_id = v_requester_id)
+    ) THEN
+      result := 'conflict';
+      RETURN;
+    END IF;
+    INSERT INTO friendships (id, user_low_id, user_high_id, source_request_id)
+    VALUES (gen_random_uuid(), LEAST(v_requester_id, v_recipient_id), GREATEST(v_requester_id, v_recipient_id), p_request_id);
+  END IF;
+
+  UPDATE friend_requests SET status = p_status, updated_at = clock_timestamp()
+  WHERE id = p_request_id
+  RETURNING id, status, updated_at INTO relation_id, relation_status, relation_updated_at;
+
+  result := 'ok';
+END;
+$$;
+
+-- 認証に失敗したら行を返さない。有効なセッションが複数残らないよう、users 行のロックの下で置き換える。
+CREATE OR REPLACE FUNCTION login_user(p_username text, p_secret_key_hash text, p_token_hash text)
+RETURNS SETOF users LANGUAGE plpgsql AS $$
+DECLARE
+  v_user users;
+BEGIN
+  SELECT * INTO v_user FROM users WHERE username = p_username FOR NO KEY UPDATE;
+  IF NOT FOUND OR v_user.status <> 'active' OR v_user.secret_key_hash <> p_secret_key_hash THEN
+    RETURN;
+  END IF;
+
+  UPDATE login_sessions
+  SET active = false, invalidated_at = clock_timestamp(), reason = 'replaced'
+  WHERE user_id = v_user.id AND active = true;
+  INSERT INTO login_sessions (id, user_id, token_hash) VALUES (gen_random_uuid(), v_user.id, p_token_hash);
+
+  RETURN NEXT v_user;
+END;
+$$;
+
+-- users 行のロックの下で読んだ所属リージョンを返す。
+CREATE OR REPLACE FUNCTION logout_user(p_user_id text, p_token_hash text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+  v_region text;
+BEGIN
+  SELECT region INTO STRICT v_region FROM users WHERE id = p_user_id FOR NO KEY UPDATE;
+
+  UPDATE login_sessions
+  SET active = false, invalidated_at = clock_timestamp(), reason = 'logout'
+  WHERE user_id = p_user_id AND active = true AND token_hash = p_token_hash;
+
+  RETURN v_region;
+END;
+$$;
+
+-- 投稿枠は users 行のロックでユーザー単位に直列化する。VOLATILE なので、件数はロックを待ったあとのスナップショットで数える。
+-- ウィンドウ行は FOR SHARE にし、別ユーザーの投稿を並ばせない。期間終了の UPDATE とは衝突する。
+-- 呼び出し元の文のスナップショットはロックを待つ前に決まるので、応答に使う行はここで読んだものを返す。
+-- 投稿枠が空いていなければ行を返さない。
+CREATE OR REPLACE FUNCTION create_post(
+  p_author_id text,
+  p_image_id text,
+  p_caption text,
+  p_visibility text,
+  p_location_kind text,
+  p_latitude numeric,
+  p_longitude numeric,
+  p_locality text,
+  OUT new_post posts,
+  OUT post_window posting_windows,
+  OUT author users
+) RETURNS SETOF record LANGUAGE plpgsql AS $$
+DECLARE
+  v_active_posts bigint;
+  v_deleted_posts bigint;
+  v_posted_at timestamptz;
+BEGIN
+  SELECT * INTO STRICT author FROM users WHERE id = p_author_id AND status = 'active' FOR NO KEY UPDATE;
+
+  SELECT * INTO post_window FROM posting_windows WHERE region = author.region AND ended_at IS NULL FOR SHARE;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  SELECT count(*) FILTER (WHERE p.deleted_at IS NULL), count(*) FILTER (WHERE p.deleted_at IS NOT NULL)
+  INTO v_active_posts, v_deleted_posts
+  FROM posts p JOIN posting_windows w ON w.id = p.posting_window_id
+  WHERE p.author_id = p_author_id AND w.local_date = post_window.local_date;
+
+  v_posted_at := clock_timestamp();
+  IF v_active_posts <> 0 OR v_deleted_posts >= 2 OR v_posted_at < post_window.starts_at THEN
+    RETURN;
+  END IF;
+
+  INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility,
+                     location_kind, latitude, longitude, locality, posted_at)
+  VALUES (gen_random_uuid(), p_author_id, post_window.id, p_image_id, p_caption, p_visibility,
+          p_location_kind, p_latitude, p_longitude, p_locality, v_posted_at)
+  RETURNING * INTO new_post;
+
+  RETURN NEXT;
+END;
+$$;
+
 COMMIT;
