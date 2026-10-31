@@ -107,6 +107,9 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := post.Author.setImageKey(); err != nil {
 			return err
 		}
+		if err := publishActivePost(ctx, h, post); err != nil {
+			return err
+		}
 		return c.JSON(http.StatusCreated, newPostResponse(post.Post, post.Author))
 	}
 }
@@ -185,7 +188,7 @@ func getPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		viewer, err := loadViewerContext(ctx, h.ReadDB, h.Graph, GetSession(c).UserID)
+		viewer, err := loadViewerContext(ctx, h.ReadDB, h.Graph, GetSession(c).UserID, h.Active)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -277,6 +280,11 @@ func updatePostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		if h.Active.Live() {
+			if err := publishActivePost(ctx, h, PostWithAuthor{Post: post, Author: user}); err != nil {
+				return err
+			}
+		}
 		return c.JSON(http.StatusOK, updatePostResponse(newPostResponse(post, user)))
 	}
 }
@@ -330,6 +338,9 @@ func deletePostHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
+			return err
+		}
+		if err := withdrawActivePost(ctx, h, post.ID); err != nil {
 			return err
 		}
 		return c.NoContent(http.StatusNoContent)

@@ -57,7 +57,7 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_pagination")
 		}
 		ctx := c.Request().Context()
-		viewer, err := loadViewerContext(ctx, h.ReadDB, h.Graph, GetSession(c).UserID)
+		viewer, err := loadViewerContext(ctx, h.ReadDB, h.Graph, GetSession(c).UserID, h.Active)
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.JSON(http.StatusOK, getFeedResponse{Items: []feedItemResponse{}})
 		}
@@ -87,9 +87,16 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 		if ranked {
 			beforePostedAt, beforeID = nil, ""
 		}
-		posts, err := selectFeedPosts(ctx, h.ReadDB, viewer, following, input.Feed, beforePostedAt, beforeID)
-		if err != nil {
-			return err
+		var posts []PostWithAuthor
+		hit := false
+		if input.Feed == "friends" {
+			posts, hit = h.Active.FriendsFeed(viewer, beforePostedAt, beforeID, feedPageLimit)
+		}
+		if !hit {
+			posts, err = selectFeedPosts(ctx, h.ReadDB, viewer, following, input.Feed, beforePostedAt, beforeID)
+			if err != nil {
+				return err
+			}
 		}
 		candidates := posts
 		if input.Feed != "friends" {

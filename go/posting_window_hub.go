@@ -76,8 +76,13 @@ func (h *PostingWindowHub) Publish(event postingWindowEvent) {
 	}
 }
 
-func notifyPostingWindowPeers(ctx context.Context, h *HandlerContext, event postingWindowEvent) {
+func deliverPostingWindow(h *HandlerContext, event postingWindowEvent) {
 	h.Windows.Publish(event)
+	h.Active.DropOtherWindows(event.Region, event.ID)
+}
+
+func notifyPostingWindowPeers(ctx context.Context, h *HandlerContext, event postingWindowEvent) {
+	deliverPostingWindow(h, event)
 	body, err := json.Marshal(event)
 	if err != nil {
 		return
@@ -108,7 +113,7 @@ func notifyPostingWindowHandler(h *HandlerContext) echo.HandlerFunc {
 		if !validRegion(event.Region) || event.ID == "" {
 			return NewAPIError(http.StatusBadRequest, "invalid_posting_window")
 		}
-		h.Windows.Publish(event)
+		deliverPostingWindow(h, event)
 		return c.NoContent(http.StatusNoContent)
 	}
 }

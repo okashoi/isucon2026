@@ -24,6 +24,7 @@ type HandlerContext struct {
 	Graph      *GraphCache
 	PostImages *PostImageStore
 	Windows    *PostingWindowHub
+	Active     *ActivePostStore
 }
 
 func openDB(dsn string) *sqlx.DB {
@@ -71,6 +72,7 @@ func NewServer(config *Config) *echo.Echo {
 		Graph:      NewGraphCache(),
 		PostImages: postImages,
 		Windows:    NewPostingWindowHub(),
+		Active:     NewActivePostStore(),
 	}
 	e.Use(IPBanMiddleware(handlerContext))
 	e.Use(AbuseBanMiddleware(handlerContext))
@@ -87,6 +89,9 @@ func NewServer(config *Config) *echo.Echo {
 	e.POST("/internal/post-image-cache", fillPostImageCacheHandler(handlerContext))
 	e.PUT("/internal/image-cache/:imageId", putImageCacheHandler(handlerContext))
 	e.POST("/internal/posting-window-notify", notifyPostingWindowHandler(handlerContext))
+	e.POST("/internal/active-posts", postActivePostHandler(handlerContext))
+	e.DELETE("/internal/active-posts", purgeActivePostsHandler(handlerContext))
+	e.DELETE("/internal/active-posts/:postId", deleteActivePostHandler(handlerContext))
 
 	e.POST("/api/initialize", initializeHandler(handlerContext))
 	e.POST("/api/auth/register", registerHandler(handlerContext))

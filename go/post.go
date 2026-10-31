@@ -129,11 +129,11 @@ const viewerHasPostedTodaySQL = `
 // loadViewerContext は利用者、友達、ブロック、今日の投稿有無を取る。
 // cache に友達とブロックがあれば、その 2 つは DB に聞き直さない。cache が nil なら毎回 DB から取る。
 // 友達の友達の集計は重いので、loadFriendsOfFriends を必要なリクエストだけが呼ぶ。
-func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, cache *GraphCache, viewerID string) (viewerContext, error) {
+func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, cache *GraphCache, viewerID string, active *ActivePostStore) (viewerContext, error) {
 	viewer := viewerContext{Friends: map[string]bool{}, FriendsOfFriends: map[string]bool{}, MutualFriends: map[string]int{}, Blocked: map[string]bool{}}
 	if cache != nil {
 		if friends, blocked, ok := cache.Get(viewerID); ok {
-			if err := loadViewerIdentity(ctx, db, viewerID, &viewer); err != nil {
+			if err := loadViewerIdentity(ctx, db, viewerID, &viewer, active); err != nil {
 				return viewer, err
 			}
 			viewer.Friends = friends
@@ -170,6 +170,9 @@ func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, cache *Graph
 	}
 	viewer.User = row.User
 	viewer.HasPostedToday = row.HasPostedToday
+	if active != nil && active.HasPostedToday(viewerID) {
+		viewer.HasPostedToday = true
+	}
 	var blockedIDs, friendIDs []string
 	if err := json.Unmarshal(row.BlockedIDs, &blockedIDs); err != nil {
 		return viewer, err
@@ -192,7 +195,14 @@ func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, cache *Graph
 	return viewer, nil
 }
 
-func loadViewerIdentity(ctx context.Context, db sqlx.QueryerContext, viewerID string, viewer *viewerContext) error {
+func loadViewerIdentity(ctx context.Context, db sqlx.QueryerContext, viewerID string, viewer *viewerContext, active *ActivePostStore) error {
+	if active != nil && active.HasPostedToday(viewerID) {
+		if err := sqlx.GetContext(ctx, db, &viewer.User, `SELECT `+userColumnList+` FROM users WHERE id = $1 AND status = 'active'`, viewerID); err != nil {
+			return err
+		}
+		viewer.HasPostedToday = true
+		return viewer.setImageKey()
+	}
 	var row struct {
 		User
 		HasPostedToday bool `db:"has_posted_today"`
@@ -293,7 +303,7 @@ func canViewPost(ctx context.Context, db sqlx.QueryerContext, cache *GraphCache,
 	if err != nil {
 		return false, err
 	}
-	viewer, err := loadViewerContext(ctx, db, cache, viewerID)
+	viewer, err := loadViewerContext(ctx, db, cache, viewerID, nil)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

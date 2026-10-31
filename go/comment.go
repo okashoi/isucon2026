@@ -53,7 +53,7 @@ func canComment(ctx context.Context, db sqlx.QueryerContext, cache *GraphCache, 
 	if err != nil {
 		return false, err
 	}
-	viewer, err := loadViewerContext(ctx, db, cache, viewerID)
+	viewer, err := loadViewerContext(ctx, db, cache, viewerID, nil)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

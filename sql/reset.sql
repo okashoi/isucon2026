@@ -252,6 +252,7 @@ $$;
 -- 呼び出し元の文のスナップショットはロックを待つ前に決まるので、応答に使う行はここで読んだものを返す。
 -- 投稿枠が空いていなければ行を返さない。
 -- 画像の行も同じトランザクションで書く。バイト列は DB に書かず、p_image_origin のサーバのローカルにある。
+-- 友達フィードは各アプリのメモリを読む。standby の反映を待たずに commit する。
 DROP FUNCTION IF EXISTS create_post(text, text, text, text, text, numeric, numeric, text);
 CREATE OR REPLACE FUNCTION create_post(
   p_author_id text,
@@ -272,6 +273,7 @@ DECLARE
   v_deleted_posts bigint;
   v_posted_at timestamptz;
 BEGIN
+  PERFORM set_config('synchronous_commit', 'local', true);
   SELECT * INTO STRICT author FROM users WHERE id = p_author_id AND status = 'active' FOR NO KEY UPDATE;
 
   SELECT * INTO post_window FROM posting_windows WHERE region = author.region AND ended_at IS NULL FOR SHARE;
