@@ -2,6 +2,13 @@ SET session_replication_role = replica;
 
 BEGIN;
 
+-- Go の normalizeSearchText（cases.Fold + NFC）の値。PostgreSQL の lower() とは一致しないため、
+-- 初期データの値は初期化処理が Go で計算して initial_users に埋める。
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username_norm text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name_norm text;
+ALTER TABLE initial_users ADD COLUMN IF NOT EXISTS username_norm text;
+ALTER TABLE initial_users ADD COLUMN IF NOT EXISTS display_name_norm text;
+
 TRUNCATE ip_bans, login_sessions, administrator_sessions, friendships, friend_requests, follows, block_relations;
 
 DELETE FROM comments WHERE created_at > (SELECT created_at FROM initial_data_boundary);
@@ -24,11 +31,12 @@ DELETE FROM users WHERE created_at > (SELECT created_at FROM initial_data_bounda
 
 UPDATE users u
 SET display_name = i.display_name, bio = i.bio, profile_image_id = i.profile_image_id, region = i.region,
-    account_type = i.account_type, status = i.status, deleted_at = i.deleted_at, updated_at = i.updated_at
+    account_type = i.account_type, status = i.status, deleted_at = i.deleted_at, updated_at = i.updated_at,
+    username_norm = i.username_norm, display_name_norm = i.display_name_norm
 FROM initial_users i
 WHERE u.id = i.id
-  AND (u.display_name, u.bio, u.profile_image_id, u.region, u.account_type, u.status, u.deleted_at, u.updated_at)
-      IS DISTINCT FROM (i.display_name, i.bio, i.profile_image_id, i.region, i.account_type, i.status, i.deleted_at, i.updated_at);
+  AND (u.display_name, u.bio, u.profile_image_id, u.region, u.account_type, u.status, u.deleted_at, u.updated_at, u.username_norm, u.display_name_norm)
+      IS DISTINCT FROM (i.display_name, i.bio, i.profile_image_id, i.region, i.account_type, i.status, i.deleted_at, i.updated_at, i.username_norm, i.display_name_norm);
 
 INSERT INTO friend_requests (id, requester_id, recipient_id, status, created_at, updated_at)
 SELECT id, requester_id, recipient_id, status, created_at, updated_at FROM initial_friend_requests;

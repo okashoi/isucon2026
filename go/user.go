@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -71,4 +72,40 @@ func queryUser(ctx context.Context, db sqlx.QueryerContext, query, userID string
 		return user, err
 	}
 	return user, user.setImageKey()
+}
+
+// 初期データの username_norm / display_name_norm を normalizeSearchText で埋める。
+// PostgreSQL の lower() は Go の cases.Fold + NFC と一致しないので SQL では生成できない。
+// initial_users に埋めるのは初回だけで、以降の reset.sql はそこから users へ復元する。
+func backfillUserSearchNorms(ctx context.Context, db *sqlx.DB) error {
+	var rows []struct {
+		ID          string `db:"id"`
+		Username    string `db:"username"`
+		DisplayName string `db:"display_name"`
+	}
+	if err := db.SelectContext(ctx, &rows, `SELECT id, username, display_name FROM initial_users WHERE username_norm IS NULL`); err != nil {
+		return err
+	}
+	for chunk := range slices.Chunk(rows, 5000) {
+		ids := make([]string, len(chunk))
+		usernames := make([]string, len(chunk))
+		displayNames := make([]string, len(chunk))
+		for i, row := range chunk {
+			ids[i] = row.ID
+			usernames[i] = normalizeSearchText(row.Username)
+			displayNames[i] = normalizeSearchText(row.DisplayName)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE initial_users i
+			SET username_norm = v.username_norm, display_name_norm = v.display_name_norm
+			FROM (SELECT unnest($1::text[]) AS id, unnest($2::text[]) AS username_norm, unnest($3::text[]) AS display_name_norm) v
+			WHERE i.id = v.id`, preparedQuery, ids, usernames, displayNames); err != nil {
+			return err
+		}
+	}
+	_, err := db.ExecContext(ctx, `UPDATE users u
+		SET username_norm = i.username_norm, display_name_norm = i.display_name_norm
+		FROM initial_users i
+		WHERE u.id = i.id
+		  AND (u.username_norm, u.display_name_norm) IS DISTINCT FROM (i.username_norm, i.display_name_norm)`)
+	return err
 }
