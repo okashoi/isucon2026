@@ -59,6 +59,8 @@ func putProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		// 失敗しても取得はファイルが無い画像だけ DB から読む。
+		_ = h.PostImages.Save(imageID, data)
 		return c.NoContent(http.StatusNoContent)
 	}
 }

@@ -60,6 +60,7 @@ func NewServer(config *Config) *echo.Echo {
 	// 他のアプリサーバが :8080 へ直接送る。nginx は /api/ だけを転送するので、ルーターの公開先からは届かない。
 	e.DELETE("/internal/session-cache", purgeAllSessionsHandler(handlerContext))
 	e.DELETE("/internal/session-cache/:userId", purgeUserSessionHandler(handlerContext))
+	e.DELETE("/internal/image-cache", purgeImageCacheHandler(handlerContext))
 	// make post-images/sync が asia1 へ送る。
 	e.POST("/internal/post-image-cache", fillPostImageCacheHandler(handlerContext))
 

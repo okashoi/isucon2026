@@ -12,11 +12,15 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-// 投稿画像の JPEG をアプリサーバーのローカルに置く。
-// エクスポートは初期データのバイト列をリクエストのたびに DB から運ばない。
+// 画像の JPEG をアプリサーバーのローカルに置く。
+// 画像の取得とエクスポートは、バイト列をリクエストのたびに DB から運ばない。
+// 画像は ID ごとに中身が変わらないので、取得の可否だけを DB で確認すればよい。
 type PostImageStore struct {
+	// make post-images/sync が配る初期データの画像。初期化では消さない。
 	dir string
-	mu  sync.Mutex
+	// 実行中に書き込んだ画像と、DB から読んだ画像。初期化で消す。
+	runtimeDir string
+	mu         sync.Mutex
 }
 
 func NewPostImageStore() (*PostImageStore, error) {
@@ -25,17 +29,23 @@ func NewPostImageStore() (*PostImageStore, error) {
 		// 作業ディレクトリは go/ なので webapp/post-images になる。make post-images/sync もここへ配る。
 		dir = "../post-images"
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
+	runtimeDir := os.Getenv("ISUREAL_IMAGE_CACHE_DIR")
+	if runtimeDir == "" {
+		runtimeDir = "../image-cache"
 	}
-	return &PostImageStore{dir: dir}, nil
+	for _, d := range []string{dir, runtimeDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return nil, err
+		}
+	}
+	return &PostImageStore{dir: dir, runtimeDir: runtimeDir}, nil
 }
 
-func (s *PostImageStore) path(id string) (string, error) {
+func imageFilePath(dir, id string) (string, error) {
 	if !validImageFileID(id) {
 		return "", errors.New("invalid image id")
 	}
-	return filepath.Join(s.dir, id), nil
+	return filepath.Join(dir, id), nil
 }
 
 func validImageFileID(id string) bool {
@@ -53,21 +63,26 @@ func validImageFileID(id string) bool {
 }
 
 func (s *PostImageStore) Read(id string) ([]byte, error) {
-	path, err := s.path(id)
+	path, err := imageFilePath(s.dir, id)
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(path)
+	data, err := os.ReadFile(path)
+	if !errors.Is(err, os.ErrNotExist) {
+		return data, err
+	}
+	return os.ReadFile(filepath.Join(s.runtimeDir, id))
 }
 
+// Save は実行中に得た画像を置く。初期化で消える。
 func (s *PostImageStore) Save(id string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.save(id, data)
+	return save(s.runtimeDir, id, data)
 }
 
-func (s *PostImageStore) save(id string, data []byte) error {
-	path, err := s.path(id)
+func save(dir, id string, data []byte) error {
+	path, err := imageFilePath(dir, id)
 	if err != nil {
 		return err
 	}
@@ -78,16 +93,44 @@ func (s *PostImageStore) save(id string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
-// FillMissing は未削除投稿が参照する画像のうち、ファイルが無いものだけを DB から書き出す。
+// Clear は実行中に置いた画像を消す。初期データの画像は残す。
+func (s *PostImageStore) Clear() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.RemoveAll(s.runtimeDir); err != nil {
+		return err
+	}
+	return os.MkdirAll(s.runtimeDir, 0o755)
+}
+
+// Load は画像のバイト列をローカルから返す。無ければ DB から読んで置く。
+// 画像の行が無ければ sql.ErrNoRows を返す。取得してよいかは呼び出し側が確認する。
+func (s *PostImageStore) Load(ctx context.Context, db sqlx.QueryerContext, id string) ([]byte, error) {
+	data, err := s.Read(id)
+	if err == nil {
+		return data, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) && validImageFileID(id) {
+		return nil, err
+	}
+	if err := sqlx.GetContext(ctx, db, &data, `SELECT data FROM image_objects WHERE id = $1`, preparedQuery, id); err != nil {
+		return nil, err
+	}
+	// 置けなくても次の取得で DB から読み直す。
+	_ = s.Save(id, data)
+	return data, nil
+}
+
+// FillMissing は初期データの画像のうち、ファイルが無いものだけを DB から書き出す。
 // 画像は ID ごとに中身が変わらないので、置いたファイルは消さない。
 func (s *PostImageStore) FillMissing(ctx context.Context, db *sqlx.DB) error {
 	var ids []string
-	if err := db.SelectContext(ctx, &ids, `SELECT DISTINCT image_id FROM posts WHERE deleted_at IS NULL`); err != nil {
+	if err := db.SelectContext(ctx, &ids, `SELECT id FROM image_objects WHERE created_at <= (SELECT created_at FROM initial_data_boundary)`); err != nil {
 		return err
 	}
 	var missing []string
 	for _, id := range ids {
-		path, err := s.path(id)
+		path, err := imageFilePath(s.dir, id)
 		if err != nil {
 			return err
 		}
@@ -100,7 +143,7 @@ func (s *PostImageStore) FillMissing(ctx context.Context, db *sqlx.DB) error {
 	}
 	for len(missing) > 0 {
 		n := min(len(missing), fillBatchSize)
-		if err := s.loadFromDB(ctx, db, missing[:n], nil); err != nil {
+		if err := s.loadFromDB(ctx, db, missing[:n], s.dir, nil); err != nil {
 			return err
 		}
 		missing = missing[n:]
@@ -132,14 +175,14 @@ func (s *PostImageStore) Bytes(ctx context.Context, db *sqlx.DB, ids []string) (
 	if len(missing) == 0 {
 		return out, nil
 	}
-	if err := s.loadFromDB(ctx, db, missing, out); err != nil {
+	if err := s.loadFromDB(ctx, db, missing, s.runtimeDir, out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// loadFromDB は ids の画像を DB から読んでファイルに置く。out が nil でなければ中身も入れる。
-func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []string, out map[string][]byte) error {
+// loadFromDB は ids の画像を DB から読んで dir に置く。out が nil でなければ中身も入れる。
+func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []string, dir string, out map[string][]byte) error {
 	query, args, err := sqlx.In(`SELECT id, data FROM image_objects WHERE id IN (?)`, ids)
 	if err != nil {
 		return err
@@ -156,7 +199,10 @@ func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []stri
 		if err := rows.Scan(&id, &data); err != nil {
 			return err
 		}
-		if err := s.Save(id, data); err != nil {
+		s.mu.Lock()
+		err := save(dir, id, data)
+		s.mu.Unlock()
+		if err != nil {
 			return err
 		}
 		if out != nil {
@@ -164,6 +210,31 @@ func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []stri
 		}
 	}
 	return rows.Err()
+}
+
+// purgeAllImageCaches は全リージョンのサーバで、実行中に置いた画像を消す。
+func purgeAllImageCaches(ctx context.Context, h *HandlerContext) error {
+	if err := h.PostImages.Clear(); err != nil {
+		return err
+	}
+	for region, peerURL := range h.Config.PeerURLs {
+		if region == h.Config.Region {
+			continue
+		}
+		if err := requestPeerPurge(ctx, peerURL+"/internal/image-cache"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func purgeImageCacheHandler(h *HandlerContext) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		if err := h.PostImages.Clear(); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	}
 }
 
 func fillPostImageCacheHandler(h *HandlerContext) echo.HandlerFunc {

@@ -35,7 +35,7 @@ deploy: build
 		ssh $$h "mv $(REMOTE_APP_BIN).new $(REMOTE_APP_BIN) && sudo systemctl restart $(APPNAME)"; \
 	done
 
-# エクスポート用の投稿画像を asia1 で DB から書き出し、europe1 / america1 へ配る。
+# 初期データの画像を asia1 で DB から書き出し、europe1 / america1 へ配る。画像の取得とエクスポートが使う。
 # 初期化では書き出さないので、アプリの起動後、ベンチの前に実行する。足りないファイルだけを扱うので繰り返してよい。
 POST_IMAGE_DIR := /home/isucon/webapp/post-images
 POST_IMAGE_SOURCE := isucon-s1
