@@ -18,6 +18,9 @@ import (
 // feedPageLimit は 1 ページ 50 件の次があるかを見るための件数。
 const feedPageLimit = 51
 
+// feedFoFCandidateLimit はスコア計算前に取る投稿の上限。全件取得を避ける。
+const feedFoFCandidateLimit = 300
+
 type getFeedRequest struct {
 	Feed           string     `param:"feed"`
 	BeforeScore    *int64     `query:"beforeScore"`
@@ -54,7 +57,7 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_pagination")
 		}
 		ctx := c.Request().Context()
-		viewer, err := loadViewerContext(ctx, h.ReadDB, GetSession(c).UserID)
+		viewer, err := loadViewerContext(ctx, h.ReadDB, h.Graph, GetSession(c).UserID, h.Active)
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.JSON(http.StatusOK, getFeedResponse{Items: []feedItemResponse{}})
 		}
@@ -84,14 +87,24 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 		if ranked {
 			beforePostedAt, beforeID = nil, ""
 		}
-		posts, err := selectFeedPosts(ctx, h.ReadDB, viewer, following, input.Feed, beforePostedAt, beforeID)
-		if err != nil {
-			return err
+		var posts []PostWithAuthor
+		hit := false
+		if input.Feed == "friends" {
+			posts, hit = h.Active.FriendsFeed(viewer, beforePostedAt, beforeID, feedPageLimit)
 		}
-		candidates := make([]PostWithAuthor, 0)
-		for _, post := range posts {
-			if viewer.canView(post.Post) && matchesFeed(viewer, following, post.Post, input.Feed) {
-				candidates = append(candidates, post)
+		if !hit {
+			posts, err = selectFeedPosts(ctx, h.ReadDB, viewer, following, input.Feed, beforePostedAt, beforeID)
+			if err != nil {
+				return err
+			}
+		}
+		candidates := posts
+		if input.Feed != "friends" {
+			candidates = make([]PostWithAuthor, 0)
+			for _, post := range posts {
+				if viewer.canView(post.Post) && matchesFeed(viewer, following, post.Post, input.Feed) {
+					candidates = append(candidates, post)
+				}
 			}
 		}
 		var scores map[string]int64
@@ -133,20 +146,20 @@ func selectFeedPosts(ctx context.Context, db sqlx.QueryerContext, viewer viewerC
 	switch feed {
 	case "friends":
 		authors := idList(viewer.Friends, viewer.ID, viewer.Blocked)
-		return selectAuthorFeed(ctx, db, viewer.ID, authors, []string{"public", "friends", "friends_of_friends"}, beforePostedAt, beforeID, true)
+		return selectAuthorFeed(ctx, db, viewer.ID, authors, []string{"public", "friends", "friends_of_friends"}, beforePostedAt, beforeID, feedPageLimit)
 	case "public":
 		return selectPublicFeed(ctx, db, viewer, beforePostedAt, beforeID)
 	case "following":
 		return selectFollowingFeed(ctx, db, viewer, following, beforePostedAt, beforeID)
 	case "friends-of-friends":
 		authors := idList(viewer.FriendsOfFriends, viewer.ID, viewer.Friends, viewer.Blocked)
-		return selectAuthorFeed(ctx, db, viewer.ID, authors, []string{"public", "friends_of_friends"}, nil, "", false)
+		return selectAuthorFeed(ctx, db, viewer.ID, authors, []string{"public", "friends_of_friends"}, nil, "", feedFoFCandidateLimit)
 	default:
 		return []PostWithAuthor{}, nil
 	}
 }
 
-func selectAuthorFeed(ctx context.Context, db sqlx.QueryerContext, viewerID string, authors, visibilities []string, before *time.Time, beforeID string, limit bool) ([]PostWithAuthor, error) {
+func selectAuthorFeed(ctx context.Context, db sqlx.QueryerContext, viewerID string, authors, visibilities []string, before *time.Time, beforeID string, limit int) ([]PostWithAuthor, error) {
 	if len(authors) == 0 {
 		return []PostWithAuthor{}, nil
 	}
@@ -158,8 +171,8 @@ func selectAuthorFeed(ctx context.Context, db sqlx.QueryerContext, viewerID stri
 	args := []any{viewerID, authors, visibilities}
 	condition, args = appendFeedSeek(condition, args, before, beforeID)
 	condition += ` ORDER BY p.posted_at DESC, p.id DESC`
-	if limit {
-		condition += fmt.Sprintf(` LIMIT %d`, feedPageLimit)
+	if limit > 0 {
+		condition += fmt.Sprintf(` LIMIT %d`, limit)
 	}
 	return queryFeedPosts(ctx, db, condition, args)
 }

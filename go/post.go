@@ -107,6 +107,24 @@ func getPostWithAuthor(ctx context.Context, db sqlx.QueryerContext, postID strin
 	return posts[0], nil
 }
 
+func resolvePost(h *HandlerContext, ctx context.Context, db sqlx.QueryerContext, postID string) (Post, error) {
+	if h != nil && h.Active != nil {
+		if post, ok := h.Active.Get(postID); ok {
+			return post.Post, nil
+		}
+	}
+	return getPost(ctx, db, postID)
+}
+
+func resolvePostWithAuthor(h *HandlerContext, ctx context.Context, db sqlx.QueryerContext, postID string) (PostWithAuthor, error) {
+	if h != nil && h.Active != nil {
+		if post, ok := h.Active.Get(postID); ok {
+			return post, nil
+		}
+	}
+	return getPostWithAuthor(ctx, db, postID)
+}
+
 type viewerContext struct {
 	User
 	HasPostedToday         bool
@@ -117,10 +135,34 @@ type viewerContext struct {
 	friendsOfFriendsLoaded bool
 }
 
-// loadViewerContext は利用者、友達、ブロック、今日の投稿有無を 1 往復で取る。
+const viewerHasPostedTodaySQL = `
+    EXISTS(
+      SELECT 1 FROM posts p
+      JOIN posting_windows posted ON posted.id = p.posting_window_id
+      JOIN posting_windows current ON current.region = viewer.region AND current.ended_at IS NULL
+                                  AND current.local_date = posted.local_date
+      WHERE p.author_id = viewer.id AND p.deleted_at IS NULL
+    ) AS has_posted_today`
+
+// loadViewerContext は利用者、友達、ブロック、今日の投稿有無を取る。
+// cache に友達とブロックがあれば、その 2 つは DB に聞き直さない。cache が nil なら毎回 DB から取る。
 // 友達の友達の集計は重いので、loadFriendsOfFriends を必要なリクエストだけが呼ぶ。
-func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID string) (viewerContext, error) {
+func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, cache *GraphCache, viewerID string, active *ActivePostStore) (viewerContext, error) {
 	viewer := viewerContext{Friends: map[string]bool{}, FriendsOfFriends: map[string]bool{}, MutualFriends: map[string]int{}, Blocked: map[string]bool{}}
+	if cache != nil {
+		if friends, blocked, ok := cache.Get(viewerID); ok {
+			if err := loadViewerIdentity(ctx, db, viewerID, &viewer, active); err != nil {
+				return viewer, err
+			}
+			viewer.Friends = friends
+			viewer.Blocked = blocked
+			return viewer, nil
+		}
+	}
+	var generation uint64
+	if cache != nil {
+		generation = cache.Generation()
+	}
 	var row struct {
 		User
 		HasPostedToday bool   `db:"has_posted_today"`
@@ -136,13 +178,7 @@ func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID str
     SELECT user_low_id FROM friendships WHERE user_high_id = $1
   )
   SELECT viewer.*,
-    EXISTS(
-      SELECT 1 FROM posts p
-      JOIN posting_windows posted ON posted.id = p.posting_window_id
-      JOIN posting_windows current ON current.region = viewer.region AND current.ended_at IS NULL
-                                  AND current.local_date = posted.local_date
-      WHERE p.author_id = viewer.id AND p.deleted_at IS NULL
-    ) AS has_posted_today,
+    `+viewerHasPostedTodaySQL+`,
     (SELECT coalesce(json_agg(CASE WHEN blocker_id = $1 THEN blocked_id ELSE blocker_id END), '[]')
      FROM block_relations WHERE blocker_id = $1 OR blocked_id = $1) AS blocked_ids,
     (SELECT coalesce(json_agg(id), '[]') FROM friends) AS friend_ids
@@ -152,6 +188,9 @@ func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID str
 	}
 	viewer.User = row.User
 	viewer.HasPostedToday = row.HasPostedToday
+	if active != nil && active.HasPostedToday(viewerID) {
+		viewer.HasPostedToday = true
+	}
 	var blockedIDs, friendIDs []string
 	if err := json.Unmarshal(row.BlockedIDs, &blockedIDs); err != nil {
 		return viewer, err
@@ -168,7 +207,37 @@ func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID str
 	if err := viewer.setImageKey(); err != nil {
 		return viewer, err
 	}
+	if cache != nil {
+		cache.Put(generation, viewerID, viewer.Friends, viewer.Blocked)
+	}
 	return viewer, nil
+}
+
+func loadViewerIdentity(ctx context.Context, db sqlx.QueryerContext, viewerID string, viewer *viewerContext, active *ActivePostStore) error {
+	if active != nil && active.HasPostedToday(viewerID) {
+		if err := sqlx.GetContext(ctx, db, &viewer.User, `SELECT `+userColumnList+` FROM users WHERE id = $1 AND status = 'active'`, viewerID); err != nil {
+			return err
+		}
+		viewer.HasPostedToday = true
+		return viewer.setImageKey()
+	}
+	var row struct {
+		User
+		HasPostedToday bool `db:"has_posted_today"`
+	}
+	if err := sqlx.GetContext(ctx, db, &row, `
+  WITH viewer AS (
+    SELECT `+userColumnList+` FROM users WHERE id = $1 AND status = 'active'
+  )
+  SELECT viewer.*,
+    `+viewerHasPostedTodaySQL+`
+  FROM viewer
+ `, viewerID); err != nil {
+		return err
+	}
+	viewer.User = row.User
+	viewer.HasPostedToday = row.HasPostedToday
+	return viewer.setImageKey()
 }
 
 // loadFriendsOfFriends は友達の友達と、その人との共通の友達の数を取る。
@@ -244,15 +313,24 @@ func (viewer viewerContext) canView(post Post) bool {
 	}
 }
 
-func canViewPost(ctx context.Context, db sqlx.QueryerContext, viewerID, postID string) (bool, error) {
-	post, err := getPostWithAuthor(ctx, db, postID)
+func canViewPost(ctx context.Context, db sqlx.QueryerContext, cache *GraphCache, active *ActivePostStore, viewerID, postID string) (bool, error) {
+	var post PostWithAuthor
+	var err error
+	if active != nil {
+		var ok bool
+		if post, ok = active.Get(postID); !ok {
+			post, err = getPostWithAuthor(ctx, db, postID)
+		}
+	} else {
+		post, err = getPostWithAuthor(ctx, db, postID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	viewer, err := loadViewerContext(ctx, db, viewerID)
+	viewer, err := loadViewerContext(ctx, db, cache, viewerID, active)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

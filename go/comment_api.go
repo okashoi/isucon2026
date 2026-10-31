@@ -37,14 +37,17 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		post, err := getPost(ctx, h.DB, input.PostID)
+		post, err := resolvePost(h, ctx, h.DB, input.PostID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
 		if err != nil {
 			return err
 		}
-		tx, err := h.DB.BeginTxx(ctx, nil)
+		if err := h.Persist.Ensure(ctx, post.ID); err != nil {
+			return err
+		}
+		tx, err := beginLocalTx(ctx, h.DB)
 		if err != nil {
 			return err
 		}
@@ -53,7 +56,7 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 		if _, err := lockUserPair(ctx, tx, actor, post.AuthorID); err != nil {
 			return err
 		}
-		allowed, err := canComment(ctx, tx, actor, post.ID)
+		allowed, err := canComment(ctx, tx, h.Graph, h.Active, actor, post.ID)
 		if err != nil {
 			return err
 		}
@@ -61,11 +64,11 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
 		id := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id,post_id,author_id,body,created_at) VALUES($1,$2,$3,$4,clock_timestamp())`, id, post.ID, actor, input.Body); err != nil {
-			return err
-		}
-		comment, err := getComment(ctx, tx, id)
-		if err != nil {
+		var comment Comment
+		if err := tx.GetContext(ctx, &comment, `
+   INSERT INTO comments(id,post_id,author_id,body,created_at)
+   VALUES($1,$2,$3,$4,clock_timestamp())
+   RETURNING id, post_id, author_id, body, created_at, deleted_at`, id, post.ID, actor, input.Body); err != nil {
 			return err
 		}
 		user, err := getUser(ctx, tx, actor)
@@ -100,7 +103,7 @@ func getCommentsHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_pagination")
 		}
 		ctx := c.Request().Context()
-		allowed, err := canComment(ctx, h.ReadDB, GetSession(c).UserID, input.PostID)
+		allowed, err := canComment(ctx, h.ReadDB, h.Graph, h.Active, GetSession(c).UserID, input.PostID)
 		if err != nil {
 			return err
 		}
@@ -135,7 +138,7 @@ func deleteCommentHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		tx, err := h.DB.BeginTxx(ctx, nil)
+		tx, err := beginLocalTx(ctx, h.DB)
 		if err != nil {
 			return err
 		}

@@ -11,6 +11,7 @@ import (
 )
 
 // アプリ3台の primary 向け合計が s4 の max_connections（300）に収まるようにする。
+// 加点の並列を落とさないよう 100 のままにし、超user予約は運用で監視する。
 const maxDBConns = 100
 
 type HandlerContext struct {
@@ -20,7 +21,11 @@ type HandlerContext struct {
 	IPBans     *IPBanList
 	Abuse      *AbuseDetector
 	Sessions   *SessionCache
+	Graph      *GraphCache
 	PostImages *PostImageStore
+	Windows    *PostingWindowHub
+	Active     *ActivePostStore
+	Persist    *postPersistQueue
 }
 
 func openDB(dsn string) *sqlx.DB {
@@ -65,19 +70,30 @@ func NewServer(config *Config) *echo.Echo {
 		IPBans:     &IPBanList{},
 		Abuse:      NewAbuseDetector(),
 		Sessions:   NewSessionCache(),
+		Graph:      NewGraphCache(),
 		PostImages: postImages,
+		Windows:    NewPostingWindowHub(),
+		Active:     NewActivePostStore(),
 	}
+	handlerContext.Persist = startPostPersistQueue(handlerContext)
 	e.Use(IPBanMiddleware(handlerContext))
 	e.Use(AbuseBanMiddleware(handlerContext))
 
 	// 他のアプリサーバが :8080 へ直接送る。nginx は /api/ だけを転送するので、ルーターの公開先からは届かない。
 	e.DELETE("/internal/session-cache", purgeAllSessionsHandler(handlerContext))
 	e.DELETE("/internal/session-cache/:userId", purgeUserSessionHandler(handlerContext))
+	e.DELETE("/internal/graph-cache", purgeAllGraphHandler(handlerContext))
+	e.DELETE("/internal/graph-cache/:userId", purgeUserGraphHandler(handlerContext))
 	e.DELETE("/internal/image-cache", purgeImageCacheHandler(handlerContext))
 	e.DELETE("/internal/abuse-state", purgeAbuseStateHandler(handlerContext))
 	e.GET("/internal/images/:imageId", getOriginImageHandler(handlerContext))
 	// make post-images/sync が asia1 へ送る。
 	e.POST("/internal/post-image-cache", fillPostImageCacheHandler(handlerContext))
+	e.PUT("/internal/image-cache/:imageId", putImageCacheHandler(handlerContext))
+	e.POST("/internal/posting-window-notify", notifyPostingWindowHandler(handlerContext))
+	e.POST("/internal/active-posts", postActivePostHandler(handlerContext))
+	e.DELETE("/internal/active-posts", purgeActivePostsHandler(handlerContext))
+	e.DELETE("/internal/active-posts/:postId", deleteActivePostHandler(handlerContext))
 
 	e.POST("/api/initialize", initializeHandler(handlerContext))
 	e.POST("/api/auth/register", registerHandler(handlerContext))

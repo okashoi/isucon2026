@@ -68,7 +68,7 @@ CREATE INDEX IF NOT EXISTS follows_followee_id ON follows(followee_id);
 -- p_pair_key は Go の userPairAdvisoryKey の値で、lockUserPair と同じペアを直列化する。
 -- result は ok / not_found / conflict で、ok のときだけ relation_* が入る。
 -- 申請と承認は見えるものを増やすだけなので、standby の反映を待たずに commit する。
--- set_config の第3引数 true は呼び出し元のトランザクションの終わりまで効くので、明示トランザクションの中では呼ばない。
+-- 一覧は Primary を読む（go/relationship_list_api.go）。友達集合は GraphCache を捨ててから返す。
 CREATE OR REPLACE FUNCTION create_friend_request(
   p_actor text,
   p_target text,
@@ -252,6 +252,7 @@ $$;
 -- 呼び出し元の文のスナップショットはロックを待つ前に決まるので、応答に使う行はここで読んだものを返す。
 -- 投稿枠が空いていなければ行を返さない。
 -- 画像の行も同じトランザクションで書く。バイト列は DB に書かず、p_image_origin のサーバのローカルにある。
+-- 友達フィードは各アプリのメモリを読む。standby の反映を待たずに commit する。
 DROP FUNCTION IF EXISTS create_post(text, text, text, text, text, numeric, numeric, text);
 CREATE OR REPLACE FUNCTION create_post(
   p_author_id text,
@@ -272,6 +273,7 @@ DECLARE
   v_deleted_posts bigint;
   v_posted_at timestamptz;
 BEGIN
+  PERFORM set_config('synchronous_commit', 'local', true);
   SELECT * INTO STRICT author FROM users WHERE id = p_author_id AND status = 'active' FOR NO KEY UPDATE;
 
   SELECT * INTO post_window FROM posting_windows WHERE region = author.region AND ended_at IS NULL FOR SHARE;

@@ -60,7 +60,7 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		post, err := getPost(ctx, h.DB, input.PostID)
+		post, err := resolvePost(h, ctx, h.DB, input.PostID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
@@ -70,12 +70,15 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		if actor == post.AuthorID {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
+		if err := h.Persist.Ensure(ctx, post.ID); err != nil {
+			return err
+		}
 		tx, err := beginRelationshipTx(ctx, h.DB, actor, post.AuthorID)
 		if err != nil {
 			return err
 		}
 		defer tx.Rollback()
-		allowed, err := canViewPost(ctx, tx, actor, post.ID)
+		allowed, err := canViewPost(ctx, tx, h.Graph, h.Active, actor, post.ID)
 		if err != nil {
 			return err
 		}
@@ -86,15 +89,25 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		imageID := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type) VALUES($1,$2,$3,'image/jpeg')`, preparedQuery, imageID, actor, data); err != nil {
+		if err := h.PostImages.SaveOrigin(imageID, data); err != nil {
+			return err
+		}
+		keepImage := false
+		defer func() {
+			if !keepImage {
+				h.PostImages.Remove(imageID)
+			}
+		}()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type,origin_region) VALUES($1,$2,''::bytea,'image/jpeg',$3)`, preparedQuery, imageID, actor, h.Config.Region); err != nil {
 			return err
 		}
 		id := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO realmojis(id,post_id,reactor_id,image_id,reaction_type,created_at) VALUES($1,$2,$3,$4,$5,clock_timestamp())`, id, post.ID, actor, imageID, input.ReactionType); err != nil {
-			return err
-		}
-		reaction, err := getRealMoji(ctx, tx, id)
-		if err != nil {
+		var reaction RealMoji
+		if err := tx.GetContext(ctx, &reaction, `
+   INSERT INTO realmojis(id,post_id,reactor_id,image_id,reaction_type,created_at)
+   VALUES($1,$2,$3,$4,$5,clock_timestamp())
+   RETURNING id, post_id, reactor_id, image_id, reaction_type, created_at, replaced_at, deleted_at`,
+			id, post.ID, actor, imageID, input.ReactionType); err != nil {
 			return err
 		}
 		user, err := getUser(ctx, tx, actor)
@@ -104,8 +117,8 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		// 失敗しても取得はファイルが無い画像だけ DB から読む。
-		_ = h.PostImages.Save(imageID, data)
+		keepImage = true
+		h.PostImages.ReplicateToPeers(ctx, imageID, data)
 		return c.JSON(http.StatusCreated, newRealMojiResponse(reaction, user))
 	}
 }
@@ -131,7 +144,7 @@ func getRealMojisHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_pagination")
 		}
 		ctx := c.Request().Context()
-		allowed, err := canViewPost(ctx, h.ReadDB, GetSession(c).UserID, input.PostID)
+		allowed, err := canViewPost(ctx, h.ReadDB, h.Graph, h.Active, GetSession(c).UserID, input.PostID)
 		if err != nil {
 			return err
 		}
@@ -166,7 +179,7 @@ func deleteRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		tx, err := h.DB.BeginTxx(ctx, nil)
+		tx, err := beginLocalTx(ctx, h.DB)
 		if err != nil {
 			return err
 		}
