@@ -83,7 +83,7 @@ DECLARE
   v_pending_id text;
   v_pending_requester_id text;
 BEGIN
-  PERFORM set_config('synchronous_commit', 'local', true);
+  PERFORM set_config('synchronous_commit', 'off', true);
   PERFORM pg_advisory_xact_lock(p_pair_key);
 
   SELECT count(*) INTO v_active_users FROM (
@@ -217,7 +217,7 @@ RETURNS SETOF users LANGUAGE plpgsql AS $$
 DECLARE
   v_user users;
 BEGIN
-  PERFORM set_config('synchronous_commit', 'local', true);
+  PERFORM set_config('synchronous_commit', 'off', true);
   SELECT * INTO v_user FROM users WHERE username = p_username FOR NO KEY UPDATE;
   IF NOT FOUND OR v_user.status <> 'active' OR v_user.secret_key_hash <> p_secret_key_hash THEN
     RETURN;
@@ -237,6 +237,7 @@ CREATE OR REPLACE FUNCTION logout_user(p_user_id text, p_token_hash text) RETURN
 DECLARE
   v_region text;
 BEGIN
+  PERFORM set_config('synchronous_commit', 'off', true);
   SELECT region INTO STRICT v_region FROM users WHERE id = p_user_id FOR NO KEY UPDATE;
 
   UPDATE login_sessions
