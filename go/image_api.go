@@ -1,6 +1,7 @@
 package isureal
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
@@ -9,8 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v5"
 )
 
@@ -43,29 +46,36 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		ctx := c.Request().Context()
 		// 削除状態を毎回確認する。即時反映も5秒以内の許容範囲に含まれる。
 		// バイト列はローカルから返すので、DB からは鍵と取得の可否だけを 1 往復で引く。
+		meta, err := loadImageMeta(ctx, h.ReadDB, input.ImageID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return NewAPIError(http.StatusForbidden, "image_forbidden")
+		}
+		if err != nil {
+			return err
+		}
+		// 削除状態を毎回確認する。即時反映も5秒以内の許容範囲に含まれる。
+		// パーティションのある image_objects は引かず、所有者と参照元だけを 1 往復で引く。
 		var object struct {
-			SecretKeyHash string  `db:"secret_key_hash"`
-			MediaType     string  `db:"media_type"`
-			OriginRegion  *string `db:"origin_region"`
-			Visible       bool    `db:"visible"`
+			SecretKeyHash string `db:"secret_key_hash"`
+			Visible       bool   `db:"visible"`
 		}
 		err = h.ReadDB.GetContext(ctx, &object, `
-   SELECT u.secret_key_hash, i.media_type, i.origin_region, (
-     COALESCE(u.profile_image_id = i.id, false)
+   SELECT u.secret_key_hash, (
+     COALESCE(u.profile_image_id = $2, false)
      OR EXISTS (
        SELECT 1 FROM posts p
-       WHERE p.image_id = i.id AND p.author_id = u.id AND p.deleted_at IS NULL
+       WHERE p.image_id = $2 AND p.author_id = u.id AND p.deleted_at IS NULL
      )
      OR EXISTS (
        SELECT 1 FROM realmojis r
        JOIN posts p ON p.id = r.post_id AND p.deleted_at IS NULL
        JOIN users author ON author.id = p.author_id AND author.status = 'active'
-       WHERE r.image_id = i.id AND r.reactor_id = u.id AND r.replaced_at IS NULL AND r.deleted_at IS NULL
+       WHERE r.image_id = $2 AND r.reactor_id = u.id AND r.replaced_at IS NULL AND r.deleted_at IS NULL
      )
    ) AS visible
-   FROM image_objects i JOIN users u ON u.id = i.owner_user_id
-   WHERE i.id = $1 AND u.status = 'active'
-  `, preparedQuery, input.ImageID)
+   FROM users u
+   WHERE u.id = $1 AND u.status = 'active'
+  `, preparedQuery, meta.OwnerUserID, input.ImageID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}
@@ -85,7 +95,7 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 
 		// 署名を確かめてから読むので、不正な署名ではバイト列を DB から運ばない。
-		data, err := h.PostImages.Load(ctx, h.ReadDB, input.ImageID, object.OriginRegion)
+		data, err := h.PostImages.Load(ctx, h.ReadDB, input.ImageID, meta.OriginRegion)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}
@@ -95,6 +105,33 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if exp <= time.Now().Unix() {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}
-		return c.Blob(http.StatusOK, object.MediaType, data)
+		return c.Blob(http.StatusOK, meta.MediaType, data)
 	}
+}
+
+// imageMeta は image_objects の行のうち、作成後に変わらない列。
+type imageMeta struct {
+	OwnerUserID  string  `db:"owner_user_id"`
+	MediaType    string  `db:"media_type"`
+	OriginRegion *string `db:"origin_region"`
+}
+
+// imageMetaCache は画像 ID ごとの imageMeta。image_objects は created_at のパーティションが 36 個あり、
+// id だけの検索は全パーティションをロックして LockManager の待ちになる。行は初期化でしか消えない。
+var imageMetaCache sync.Map
+
+func clearImageMetaCache() {
+	imageMetaCache.Clear()
+}
+
+func loadImageMeta(ctx context.Context, db sqlx.QueryerContext, imageID string) (imageMeta, error) {
+	if meta, ok := imageMetaCache.Load(imageID); ok {
+		return meta.(imageMeta), nil
+	}
+	var meta imageMeta
+	if err := sqlx.GetContext(ctx, db, &meta, `SELECT owner_user_id, media_type, origin_region FROM image_objects WHERE id = $1`, preparedQuery, imageID); err != nil {
+		return meta, err
+	}
+	imageMetaCache.Store(imageID, meta)
+	return meta, nil
 }
