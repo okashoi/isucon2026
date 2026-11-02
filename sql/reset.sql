@@ -10,6 +10,15 @@ ALTER TABLE initial_users ADD COLUMN IF NOT EXISTS username_norm text;
 ALTER TABLE initial_users ADD COLUMN IF NOT EXISTS display_name_norm text;
 -- 実行中に投稿した画像はバイト列を DB に書かず（data は空）、書き込んだサーバのローカルにだけ置く。そのサーバのリージョン。
 ALTER TABLE image_objects ADD COLUMN IF NOT EXISTS origin_region text;
+-- GET /api/images の画像メタの引き当て用。分割のない表なので id だけの検索で 36 パーティションをロックしない。
+-- 行は作成後に変わらず、画像の削除でも消さない（可否は別のクエリで判定する）。
+CREATE TABLE IF NOT EXISTS image_meta (
+  id varchar(36) PRIMARY KEY,
+  owner_user_id varchar(36) NOT NULL,
+  media_type text NOT NULL,
+  origin_region text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
 
 TRUNCATE ip_bans, login_sessions, administrator_sessions, friendships, friend_requests, follows, block_relations;
 
@@ -30,6 +39,11 @@ BEGIN
 END $$;
 DELETE FROM image_objects WHERE created_at > (SELECT created_at FROM initial_data_boundary);
 DELETE FROM users WHERE created_at > (SELECT created_at FROM initial_data_boundary);
+DELETE FROM image_meta WHERE created_at > (SELECT created_at FROM initial_data_boundary);
+INSERT INTO image_meta (id, owner_user_id, media_type, origin_region, created_at)
+SELECT id, owner_user_id, media_type, origin_region, created_at FROM image_objects
+WHERE created_at <= (SELECT created_at FROM initial_data_boundary) AND NOT EXISTS (SELECT 1 FROM image_meta)
+ON CONFLICT DO NOTHING;
 
 UPDATE users u
 SET display_name = i.display_name, bio = i.bio, profile_image_id = i.profile_image_id, region = i.region,
@@ -83,7 +97,7 @@ DECLARE
   v_pending_id text;
   v_pending_requester_id text;
 BEGIN
-  PERFORM set_config('synchronous_commit', 'local', true);
+  PERFORM set_config('synchronous_commit', 'off', true);
   PERFORM pg_advisory_xact_lock(p_pair_key);
 
   SELECT count(*) INTO v_active_users FROM (
@@ -217,7 +231,7 @@ RETURNS SETOF users LANGUAGE plpgsql AS $$
 DECLARE
   v_user users;
 BEGIN
-  PERFORM set_config('synchronous_commit', 'local', true);
+  PERFORM set_config('synchronous_commit', 'off', true);
   SELECT * INTO v_user FROM users WHERE username = p_username FOR NO KEY UPDATE;
   IF NOT FOUND OR v_user.status <> 'active' OR v_user.secret_key_hash <> p_secret_key_hash THEN
     RETURN;
@@ -237,6 +251,7 @@ CREATE OR REPLACE FUNCTION logout_user(p_user_id text, p_token_hash text) RETURN
 DECLARE
   v_region text;
 BEGIN
+  PERFORM set_config('synchronous_commit', 'off', true);
   SELECT region INTO STRICT v_region FROM users WHERE id = p_user_id FOR NO KEY UPDATE;
 
   UPDATE login_sessions
@@ -291,12 +306,169 @@ BEGIN
 
   INSERT INTO image_objects (id, owner_user_id, data, media_type, origin_region)
   VALUES (p_image_id, p_author_id, '', 'image/jpeg', p_image_origin);
+  INSERT INTO image_meta (id, owner_user_id, media_type, origin_region)
+  VALUES (p_image_id, p_author_id, 'image/jpeg', p_image_origin);
 
   INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility,
                      location_kind, latitude, longitude, locality, posted_at)
   VALUES (gen_random_uuid(), p_author_id, post_window.id, p_image_id, p_caption, p_visibility,
           p_location_kind, p_latitude, p_longitude, p_locality, v_posted_at)
   RETURNING * INTO new_post;
+
+  RETURN NEXT;
+END;
+$$;
+
+-- canComment と同じ判定をペアのロックの下で行い、通れば書く。不可なら行を返さない。
+-- 作者本人以外は、期間中・本日投稿済み・ブロックなしのうえで public か友達。友達の友達は対象外なので集計しない。
+CREATE OR REPLACE FUNCTION create_comment(
+  p_actor text,
+  p_post_id text,
+  p_body text,
+  OUT new_comment comments,
+  OUT author users
+) RETURNS SETOF record LANGUAGE plpgsql AS $$
+DECLARE
+  v_post_author text;
+  v_visibility text;
+BEGIN
+  SELECT author_id INTO v_post_author FROM posts WHERE id = p_post_id AND deleted_at IS NULL;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(user_pair_advisory_key(p_actor, v_post_author));
+  PERFORM 1 FROM users WHERE id IN (p_actor, v_post_author) AND status = 'active' ORDER BY id FOR KEY SHARE;
+
+  SELECT p.visibility INTO v_visibility
+  FROM posts p
+  JOIN posting_windows w ON w.id = p.posting_window_id AND w.ended_at IS NULL
+  JOIN users u ON u.id = p.author_id AND u.status = 'active'
+  WHERE p.id = p_post_id AND p.deleted_at IS NULL;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  SELECT * INTO author FROM users WHERE id = p_actor AND status = 'active';
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM posts p
+    JOIN posting_windows posted ON posted.id = p.posting_window_id
+    JOIN posting_windows cur ON cur.region = author.region AND cur.ended_at IS NULL AND cur.local_date = posted.local_date
+    WHERE p.author_id = p_actor AND p.deleted_at IS NULL
+  ) THEN
+    RETURN;
+  END IF;
+
+  IF p_actor <> v_post_author THEN
+    IF EXISTS (
+      SELECT 1 FROM block_relations
+      WHERE (blocker_id = p_actor AND blocked_id = v_post_author) OR (blocker_id = v_post_author AND blocked_id = p_actor)
+    ) THEN
+      RETURN;
+    END IF;
+    IF v_visibility <> 'public' AND NOT (v_visibility IN ('friends', 'friends_of_friends') AND EXISTS (
+      SELECT 1 FROM friendships
+      WHERE (user_low_id = p_actor AND user_high_id = v_post_author) OR (user_low_id = v_post_author AND user_high_id = p_actor)
+    )) THEN
+      RETURN;
+    END IF;
+  END IF;
+
+  INSERT INTO comments (id, post_id, author_id, body, created_at)
+  VALUES (gen_random_uuid(), p_post_id, p_actor, p_body, clock_timestamp())
+  RETURNING * INTO new_comment;
+
+  RETURN NEXT;
+END;
+$$;
+
+-- Go の canViewPost と同じ判定。投稿か作者か閲覧者が無い・active でなければ false。
+CREATE OR REPLACE FUNCTION can_view_post(p_viewer text, p_post_id text) RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM posts p
+    JOIN posting_windows w ON w.id = p.posting_window_id
+    JOIN users a ON a.id = p.author_id AND a.status = 'active'
+    JOIN users v ON v.id = p_viewer AND v.status = 'active'
+    WHERE p.id = p_post_id AND p.deleted_at IS NULL
+      AND (p.author_id = p_viewer OR (
+        w.ended_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM posts vp
+          JOIN posting_windows posted ON posted.id = vp.posting_window_id
+          JOIN posting_windows cur ON cur.region = v.region AND cur.ended_at IS NULL AND cur.local_date = posted.local_date
+          WHERE vp.author_id = p_viewer AND vp.deleted_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM block_relations b
+          WHERE (b.blocker_id = p_viewer AND b.blocked_id = p.author_id) OR (b.blocker_id = p.author_id AND b.blocked_id = p_viewer))
+        AND (
+          p.visibility = 'public'
+          OR (p.visibility IN ('friends', 'friends_of_friends') AND EXISTS (
+            SELECT 1 FROM friendships f
+            WHERE (f.user_low_id = p_viewer AND f.user_high_id = p.author_id) OR (f.user_low_id = p.author_id AND f.user_high_id = p_viewer)))
+          OR (p.visibility = 'friends_of_friends' AND EXISTS (
+            SELECT 1 FROM (
+              SELECT user_high_id AS id FROM friendships WHERE user_low_id = p_viewer
+              UNION ALL
+              SELECT user_low_id FROM friendships WHERE user_high_id = p_viewer
+            ) vf
+            JOIN friendships f2 ON (f2.user_low_id = vf.id AND f2.user_high_id = p.author_id) OR (f2.user_low_id = p.author_id AND f2.user_high_id = vf.id)))
+        )
+      ))
+  );
+$$;
+
+-- RealMoji の送信を 1 文で行う。失敗は RAISE の message（interaction_forbidden / relationship_not_found）で返す。
+-- lockUserPair と同じく二人の advisory lock の下で、ロックを待ったあとの文で関係と閲覧可否を確かめる。
+-- 画像のバイト列は DB に書かず、p_image_origin のサーバのローカルにある。
+CREATE OR REPLACE FUNCTION replace_realmoji(
+  p_actor text,
+  p_post_id text,
+  p_image_id text,
+  p_image_origin text,
+  p_reaction_type text,
+  OUT reaction realmojis,
+  OUT reactor users
+) RETURNS SETOF record LANGUAGE plpgsql AS $$
+DECLARE
+  v_author_id text;
+  v_active_users integer;
+BEGIN
+  SELECT author_id INTO v_author_id FROM posts WHERE id = p_post_id AND deleted_at IS NULL;
+  IF NOT FOUND OR v_author_id = p_actor THEN
+    RAISE EXCEPTION 'interaction_forbidden';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(user_pair_advisory_key(p_actor, v_author_id));
+
+  SELECT count(*) INTO v_active_users FROM (
+    SELECT 1 FROM users
+    WHERE id IN (p_actor, v_author_id) AND status = 'active'
+    ORDER BY id
+    FOR KEY SHARE
+  ) AS locked;
+  IF v_active_users <> 2 THEN
+    RAISE EXCEPTION 'relationship_not_found';
+  END IF;
+
+  IF NOT can_view_post(p_actor, p_post_id) THEN
+    RAISE EXCEPTION 'interaction_forbidden';
+  END IF;
+
+  UPDATE realmojis SET replaced_at = clock_timestamp()
+  WHERE post_id = p_post_id AND reactor_id = p_actor AND replaced_at IS NULL AND deleted_at IS NULL;
+  INSERT INTO image_objects (id, owner_user_id, data, media_type, origin_region)
+  VALUES (p_image_id, p_actor, '', 'image/jpeg', p_image_origin);
+  INSERT INTO image_meta (id, owner_user_id, media_type, origin_region)
+  VALUES (p_image_id, p_actor, 'image/jpeg', p_image_origin);
+  INSERT INTO realmojis (id, post_id, reactor_id, image_id, reaction_type, created_at)
+  VALUES (gen_random_uuid(), p_post_id, p_actor, p_image_id, p_reaction_type, clock_timestamp())
+  RETURNING * INTO reaction;
+  SELECT * INTO STRICT reactor FROM users WHERE id = p_actor;
 
   RETURN NEXT;
 END;

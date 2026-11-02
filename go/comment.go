@@ -18,15 +18,23 @@ type Comment struct {
 	DeletedAt *time.Time `db:"deleted_at"`
 }
 
-func getComment(ctx context.Context, db sqlx.QueryerContext, id string) (Comment, error) {
-	var comment Comment
-	err := sqlx.GetContext(ctx, db, &comment, `SELECT id,post_id,author_id,body,created_at,deleted_at FROM comments WHERE id=$1`, id)
-	return comment, err
-}
-
 type CommentWithAuthor struct {
 	Comment
 	Author User `db:"author"`
+}
+
+// createComment は canComment と同じ判定をペアのロックの下で行って書く。不可なら sql.ErrNoRows を返す。
+func createComment(ctx context.Context, db sqlx.QueryerContext, actor, postID, body string) (CommentWithAuthor, error) {
+	var comment CommentWithAuthor
+	if err := sqlx.GetContext(ctx, db, &comment, `
+  SELECT c.id, c.post_id, c.author_id, c.body, c.created_at, c.deleted_at, `+userColumnsAs("u", "author")+`
+  FROM create_comment($1, $2, $3) x
+  CROSS JOIN LATERAL (SELECT (x.new_comment).*) c
+  CROSS JOIN LATERAL (SELECT (x.author).*) u
+ `, actor, postID, body); err != nil {
+		return comment, err
+	}
+	return comment, comment.Author.setImageKey()
 }
 
 func selectCommentsWithAuthor(ctx context.Context, db sqlx.QueryerContext, conditions string, args ...any) ([]CommentWithAuthor, error) {
