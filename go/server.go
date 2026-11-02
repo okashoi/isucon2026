@@ -1,7 +1,10 @@
 package isureal
 
 import (
+	"context"
 	"os"
+	"sync/atomic"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v5"
@@ -22,6 +25,43 @@ type HandlerContext struct {
 	Abuse      *AbuseDetector
 	Sessions   *SessionCache
 	PostImages *PostImageStore
+	// OffloadDB は Config.DBOffloadHost への接続。つながるまでは nil で、offloadDB が ReadDB を返す。
+	OffloadDB atomic.Pointer[sqlx.DB]
+}
+
+// offloadDB は s4 から逃がす読み取りの接続先を返す。remote_apply の同期 standby なので
+// commit 済みの書き込みは見えるが、synchronous_commit off で書く login_sessions・friend_requests を読むクエリには使わない。
+func (h *HandlerContext) offloadDB() *sqlx.DB {
+	if db := h.OffloadDB.Load(); db != nil {
+		return db
+	}
+	return h.ReadDB
+}
+
+// connectOffloadDB は起動を止めずに背景で接続し、失敗したら 10 秒ごとに再試行する。
+func (h *HandlerContext) connectOffloadDB() {
+	if h.Config.DBOffloadHost == "" {
+		return
+	}
+	dsn := h.Config.databaseDSN(h.Config.DBOffloadHost)
+	go func() {
+		for {
+			db, err := sqlx.Open("pgx", dsn)
+			if err == nil {
+				db.SetMaxOpenConns(30)
+				db.SetMaxIdleConns(30)
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				err = db.PingContext(ctx)
+				cancel()
+				if err == nil {
+					h.OffloadDB.Store(db)
+					return
+				}
+				db.Close()
+			}
+			time.Sleep(10 * time.Second)
+		}
+	}()
 }
 
 func openDB(dsn string) *sqlx.DB {
@@ -68,6 +108,7 @@ func NewServer(config *Config) *echo.Echo {
 		Sessions:   NewSessionCache(),
 		PostImages: postImages,
 	}
+	handlerContext.connectOffloadDB()
 	e.Use(IPBanMiddleware(handlerContext))
 	e.Use(AbuseBanMiddleware(handlerContext))
 

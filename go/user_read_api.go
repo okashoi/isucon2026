@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/jmoiron/sqlx"
+
 	"github.com/labstack/echo/v5"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -43,12 +45,22 @@ func searchUsersHandler(h *HandlerContext) echo.HandlerFunc {
 		viewer := GetSession(c).UserID
 		query := normalizeSearchText(input.Q)
 		var users []User
-		if err := h.ReadDB.SelectContext(ctx, &users, `SELECT `+strings.Join(userColumns, ", ")+` FROM users u
+		search := func(db *sqlx.DB) error {
+			users = users[:0]
+			return db.SelectContext(ctx, &users, `SELECT `+strings.Join(userColumns, ", ")+` FROM users u
 			WHERE status='active' AND id<>$1
 			  AND (strpos(username_norm, $2) > 0 OR strpos(display_name_norm, $2) > 0)
 			  AND NOT EXISTS (SELECT 1 FROM block_relations b WHERE (b.blocker_id=$1 AND b.blocked_id=u.id) OR (b.blocker_id=u.id AND b.blocked_id=$1))
 			  AND ($3='' OR (username,id)>($3,$4))
-			ORDER BY username, id LIMIT 51`, viewer, query, input.BeforeUsername, input.BeforeID); err != nil {
+			ORDER BY username, id LIMIT 51`, viewer, query, input.BeforeUsername, input.BeforeID)
+		}
+		// users・block_relations は remote_apply で standby に反映済みなので、s4 の CPU を食う検索を standby へ逃がす。
+		db := h.offloadDB()
+		err := search(db)
+		if err != nil && db != h.ReadDB && ctx.Err() == nil {
+			err = search(h.ReadDB)
+		}
+		if err != nil {
 			return err
 		}
 		items := make([]relationshipUserResponse, 0, len(users))

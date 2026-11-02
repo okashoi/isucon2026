@@ -18,17 +18,20 @@ type Config struct {
 	DBHost string
 	// DBReadHost が空なら読みも DBHost（primary）へ。s2/s3 では 127.0.0.1 を想定。
 	DBReadHost string
-	DBPort     string
-	DBUser     string
-	DBPassword string
-	DBName     string
-	LogLevel   string
+	// DBOffloadHost は s4 から逃がす重い読み取り（利用者検索）の宛先。空なら無効。
+	// asia で読みも s4 へ送る構成では europe1 の同期 standby（remote_apply）を既定にする。
+	DBOffloadHost string
+	DBPort        string
+	DBUser        string
+	DBPassword    string
+	DBName        string
+	LogLevel      string
 	// リージョンごとのアプリサーバ。この宛先への通信はルーターを経由する。
 	PeerURLs map[string]string
 }
 
 func ConfigFromEnv() *Config {
-	return &Config{
+	c := &Config{
 		Region:     envOrDefault("ISUREAL_REGION", "asia"),
 		DBHost:     envOrDefault("ISUREAL_DB_HOST", "127.0.0.1"),
 		DBReadHost: os.Getenv("ISUREAL_DB_READ_HOST"),
@@ -42,7 +45,12 @@ func ConfigFromEnv() *Config {
 			"europe":  envOrDefault("ISUREAL_PEER_URL_EUROPE", "http://192.168.2.10:8080"),
 			"america": envOrDefault("ISUREAL_PEER_URL_AMERICA", "http://192.168.3.10:8080"),
 		},
+		DBOffloadHost: os.Getenv("ISUREAL_DB_OFFLOAD_HOST"),
 	}
+	if c.DBOffloadHost == "" && c.Region == "asia" && c.DBReadHost == "" {
+		c.DBOffloadHost = "192.168.2.10"
+	}
+	return c
 }
 
 func (c *Config) DatabaseDSN() string {
