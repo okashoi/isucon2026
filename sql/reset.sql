@@ -81,7 +81,7 @@ CREATE INDEX IF NOT EXISTS follows_followee_id ON follows(followee_id);
 -- VOLATILE なので文ごとにスナップショットを取り直し、advisory lock を待ったあとの文は最新の関係を読む。
 -- p_pair_key は Go の userPairAdvisoryKey の値で、lockUserPair と同じペアを直列化する。
 -- result は ok / not_found / conflict で、ok のときだけ relation_* が入る。
--- 申請と承認は見えるものを増やすだけなので、standby の反映を待たずに commit する。
+-- 申請だけのときは standby の反映を待たずに commit する。
 -- set_config の第3引数 true は呼び出し元のトランザクションの終わりまで効くので、明示トランザクションの中では呼ばない。
 CREATE OR REPLACE FUNCTION create_friend_request(
   p_actor text,
@@ -135,6 +135,8 @@ BEGIN
     result := 'conflict';
     RETURN;
   ELSE
+    -- 友達になると friends-of-friends から消える投稿があるので、承認は standby の反映を待つ。
+    PERFORM set_config('synchronous_commit', 'remote_apply', true);
     UPDATE friend_requests SET status = 'accepted', updated_at = clock_timestamp()
     WHERE id = v_pending_id
     RETURNING id, status, updated_at INTO relation_id, relation_status, relation_updated_at;
