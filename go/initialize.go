@@ -26,6 +26,7 @@ func initializeHandler(h *HandlerContext) echo.HandlerFunc {
 		err := cmd.Run()
 		clearImageSignatureCache()
 		clearImageMetaCache()
+		clearNotificationSnapshot()
 		if err != nil {
 			return err
 		}
