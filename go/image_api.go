@@ -147,7 +147,12 @@ func loadImageMeta(ctx context.Context, db sqlx.QueryerContext, imageID string) 
 		return meta.(imageMeta), nil
 	}
 	var meta imageMeta
-	if err := sqlx.GetContext(ctx, db, &meta, `SELECT owner_user_id, media_type, origin_region FROM image_objects WHERE id = $1`, preparedQuery, imageID); err != nil {
+	err := sqlx.GetContext(ctx, db, &meta, `SELECT owner_user_id, media_type, origin_region FROM image_meta WHERE id = $1`, imageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// image_meta に無い行（書き漏れ）は分割された image_objects から引く。
+		err = sqlx.GetContext(ctx, db, &meta, `SELECT owner_user_id, media_type, origin_region FROM image_objects WHERE id = $1`, preparedQuery, imageID)
+	}
+	if err != nil {
 		return meta, err
 	}
 	imageMetaCache.Store(imageID, meta)

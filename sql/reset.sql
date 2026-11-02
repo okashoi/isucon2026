@@ -10,6 +10,15 @@ ALTER TABLE initial_users ADD COLUMN IF NOT EXISTS username_norm text;
 ALTER TABLE initial_users ADD COLUMN IF NOT EXISTS display_name_norm text;
 -- 実行中に投稿した画像はバイト列を DB に書かず（data は空）、書き込んだサーバのローカルにだけ置く。そのサーバのリージョン。
 ALTER TABLE image_objects ADD COLUMN IF NOT EXISTS origin_region text;
+-- GET /api/images の画像メタの引き当て用。分割のない表なので id だけの検索で 36 パーティションをロックしない。
+-- 行は作成後に変わらず、画像の削除でも消さない（可否は別のクエリで判定する）。
+CREATE TABLE IF NOT EXISTS image_meta (
+  id varchar(36) PRIMARY KEY,
+  owner_user_id varchar(36) NOT NULL,
+  media_type text NOT NULL,
+  origin_region text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
 
 TRUNCATE ip_bans, login_sessions, administrator_sessions, friendships, friend_requests, follows, block_relations;
 
@@ -30,6 +39,11 @@ BEGIN
 END $$;
 DELETE FROM image_objects WHERE created_at > (SELECT created_at FROM initial_data_boundary);
 DELETE FROM users WHERE created_at > (SELECT created_at FROM initial_data_boundary);
+DELETE FROM image_meta WHERE created_at > (SELECT created_at FROM initial_data_boundary);
+INSERT INTO image_meta (id, owner_user_id, media_type, origin_region, created_at)
+SELECT id, owner_user_id, media_type, origin_region, created_at FROM image_objects
+WHERE created_at <= (SELECT created_at FROM initial_data_boundary) AND NOT EXISTS (SELECT 1 FROM image_meta)
+ON CONFLICT DO NOTHING;
 
 UPDATE users u
 SET display_name = i.display_name, bio = i.bio, profile_image_id = i.profile_image_id, region = i.region,
@@ -292,6 +306,8 @@ BEGIN
 
   INSERT INTO image_objects (id, owner_user_id, data, media_type, origin_region)
   VALUES (p_image_id, p_author_id, '', 'image/jpeg', p_image_origin);
+  INSERT INTO image_meta (id, owner_user_id, media_type, origin_region)
+  VALUES (p_image_id, p_author_id, 'image/jpeg', p_image_origin);
 
   INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility,
                      location_kind, latitude, longitude, locality, posted_at)
@@ -447,6 +463,8 @@ BEGIN
   WHERE post_id = p_post_id AND reactor_id = p_actor AND replaced_at IS NULL AND deleted_at IS NULL;
   INSERT INTO image_objects (id, owner_user_id, data, media_type, origin_region)
   VALUES (p_image_id, p_actor, '', 'image/jpeg', p_image_origin);
+  INSERT INTO image_meta (id, owner_user_id, media_type, origin_region)
+  VALUES (p_image_id, p_actor, 'image/jpeg', p_image_origin);
   INSERT INTO realmojis (id, post_id, reactor_id, image_id, reaction_type, created_at)
   VALUES (gen_random_uuid(), p_post_id, p_actor, p_image_id, p_reaction_type, clock_timestamp())
   RETURNING * INTO reaction;
