@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v5"
 )
 
@@ -60,53 +61,33 @@ func replaceRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		post, err := getPost(ctx, h.DB, input.PostID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
-		}
-		if err != nil {
-			return err
-		}
-		if actor == post.AuthorID {
-			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
-		}
-		tx, err := beginRelationshipTx(ctx, h.DB, actor, post.AuthorID)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		allowed, err := canViewPost(ctx, tx, actor, post.ID)
-		if err != nil {
-			return err
-		}
-		if !allowed {
-			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE realmojis SET replaced_at=clock_timestamp() WHERE post_id=$1 AND reactor_id=$2 AND replaced_at IS NULL AND deleted_at IS NULL`, post.ID, actor); err != nil {
-			return err
-		}
+		// 画像のバイト列は DB に書かず、このサーバのローカルにだけ置く。コミットより先に置く（投稿と同じ）。
 		imageID := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type) VALUES($1,$2,$3,'image/jpeg')`, preparedQuery, imageID, actor, data); err != nil {
+		if err := h.PostImages.SaveOrigin(imageID, data); err != nil {
 			return err
 		}
-		id := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO realmojis(id,post_id,reactor_id,image_id,reaction_type,created_at) VALUES($1,$2,$3,$4,$5,clock_timestamp())`, id, post.ID, actor, imageID, input.ReactionType); err != nil {
-			return err
+		keepImage := false
+		defer func() {
+			if !keepImage {
+				h.PostImages.Remove(imageID)
+			}
+		}()
+		reaction, err := replaceRealMoji(ctx, h.DB, actor, input.PostID, imageID, h.Config.Region, input.ReactionType)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "P0001" {
+			switch pgErr.Message {
+			case "interaction_forbidden":
+				return NewAPIError(http.StatusForbidden, "interaction_forbidden")
+			case "relationship_not_found":
+				return NewAPIError(http.StatusNotFound, "relationship_not_found")
+			}
 		}
-		reaction, err := getRealMoji(ctx, tx, id)
+		// ほかの失敗は確定したかどうか分からないので、ここからは画像を消さない。
+		keepImage = true
 		if err != nil {
 			return err
 		}
-		user, err := getUser(ctx, tx, actor)
-		if err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		// 失敗しても取得はファイルが無い画像だけ DB から読む。
-		_ = h.PostImages.Save(imageID, data)
-		return c.JSON(http.StatusCreated, newRealMojiResponse(reaction, user))
+		return c.JSON(http.StatusCreated, newRealMojiResponse(reaction.RealMoji, reaction.Reactor))
 	}
 }
 

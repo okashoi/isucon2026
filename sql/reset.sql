@@ -370,4 +370,90 @@ BEGIN
 END;
 $$;
 
+-- Go の canViewPost と同じ判定。投稿か作者か閲覧者が無い・active でなければ false。
+CREATE OR REPLACE FUNCTION can_view_post(p_viewer text, p_post_id text) RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM posts p
+    JOIN posting_windows w ON w.id = p.posting_window_id
+    JOIN users a ON a.id = p.author_id AND a.status = 'active'
+    JOIN users v ON v.id = p_viewer AND v.status = 'active'
+    WHERE p.id = p_post_id AND p.deleted_at IS NULL
+      AND (p.author_id = p_viewer OR (
+        w.ended_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM posts vp
+          JOIN posting_windows posted ON posted.id = vp.posting_window_id
+          JOIN posting_windows cur ON cur.region = v.region AND cur.ended_at IS NULL AND cur.local_date = posted.local_date
+          WHERE vp.author_id = p_viewer AND vp.deleted_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM block_relations b
+          WHERE (b.blocker_id = p_viewer AND b.blocked_id = p.author_id) OR (b.blocker_id = p.author_id AND b.blocked_id = p_viewer))
+        AND (
+          p.visibility = 'public'
+          OR (p.visibility IN ('friends', 'friends_of_friends') AND EXISTS (
+            SELECT 1 FROM friendships f
+            WHERE (f.user_low_id = p_viewer AND f.user_high_id = p.author_id) OR (f.user_low_id = p.author_id AND f.user_high_id = p_viewer)))
+          OR (p.visibility = 'friends_of_friends' AND EXISTS (
+            SELECT 1 FROM (
+              SELECT user_high_id AS id FROM friendships WHERE user_low_id = p_viewer
+              UNION ALL
+              SELECT user_low_id FROM friendships WHERE user_high_id = p_viewer
+            ) vf
+            JOIN friendships f2 ON (f2.user_low_id = vf.id AND f2.user_high_id = p.author_id) OR (f2.user_low_id = p.author_id AND f2.user_high_id = vf.id)))
+        )
+      ))
+  );
+$$;
+
+-- RealMoji の送信を 1 文で行う。失敗は RAISE の message（interaction_forbidden / relationship_not_found）で返す。
+-- lockUserPair と同じく二人の advisory lock の下で、ロックを待ったあとの文で関係と閲覧可否を確かめる。
+-- 画像のバイト列は DB に書かず、p_image_origin のサーバのローカルにある。
+CREATE OR REPLACE FUNCTION replace_realmoji(
+  p_actor text,
+  p_post_id text,
+  p_image_id text,
+  p_image_origin text,
+  p_reaction_type text,
+  OUT reaction realmojis,
+  OUT reactor users
+) RETURNS SETOF record LANGUAGE plpgsql AS $$
+DECLARE
+  v_author_id text;
+  v_active_users integer;
+BEGIN
+  SELECT author_id INTO v_author_id FROM posts WHERE id = p_post_id AND deleted_at IS NULL;
+  IF NOT FOUND OR v_author_id = p_actor THEN
+    RAISE EXCEPTION 'interaction_forbidden';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(user_pair_advisory_key(p_actor, v_author_id));
+
+  SELECT count(*) INTO v_active_users FROM (
+    SELECT 1 FROM users
+    WHERE id IN (p_actor, v_author_id) AND status = 'active'
+    ORDER BY id
+    FOR KEY SHARE
+  ) AS locked;
+  IF v_active_users <> 2 THEN
+    RAISE EXCEPTION 'relationship_not_found';
+  END IF;
+
+  IF NOT can_view_post(p_actor, p_post_id) THEN
+    RAISE EXCEPTION 'interaction_forbidden';
+  END IF;
+
+  UPDATE realmojis SET replaced_at = clock_timestamp()
+  WHERE post_id = p_post_id AND reactor_id = p_actor AND replaced_at IS NULL AND deleted_at IS NULL;
+  INSERT INTO image_objects (id, owner_user_id, data, media_type, origin_region)
+  VALUES (p_image_id, p_actor, '', 'image/jpeg', p_image_origin);
+  INSERT INTO realmojis (id, post_id, reactor_id, image_id, reaction_type, created_at)
+  VALUES (gen_random_uuid(), p_post_id, p_actor, p_image_id, p_reaction_type, clock_timestamp())
+  RETURNING * INTO reaction;
+  SELECT * INTO STRICT reactor FROM users WHERE id = p_actor;
+
+  RETURN NEXT;
+END;
+$$;
+
 COMMIT;

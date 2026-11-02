@@ -18,10 +18,21 @@ type RealMoji struct {
 	DeletedAt    *time.Time `db:"deleted_at"`
 }
 
-func getRealMoji(ctx context.Context, db sqlx.QueryerContext, id string) (RealMoji, error) {
-	var reaction RealMoji
-	err := sqlx.GetContext(ctx, db, &reaction, `SELECT id, post_id, reactor_id, image_id, reaction_type, created_at, replaced_at, deleted_at FROM realmojis WHERE id=$1`, id)
-	return reaction, err
+// replaceRealMoji は replace_realmoji を 1 文で呼ぶ。失敗は *pgconn.PgError の Message で返る。
+// 画像の行も同じ文で書く。バイト列は imageOrigin のリージョンのサーバのローカルにある。
+func replaceRealMoji(ctx context.Context, db sqlx.QueryerContext, actor, postID, imageID, imageOrigin, reactionType string) (RealMojiWithReactor, error) {
+	var reaction RealMojiWithReactor
+	err := sqlx.GetContext(ctx, db, &reaction, `
+  SELECT r.id, r.post_id, r.reactor_id, r.image_id, r.reaction_type, r.created_at, r.replaced_at, r.deleted_at,
+         `+userColumnsAs("u", "reactor")+`
+  FROM replace_realmoji($1, $2, $3, $4, $5) c
+  CROSS JOIN LATERAL (SELECT (c.reaction).*) r
+  CROSS JOIN LATERAL (SELECT (c.reactor).*) u
+ `, actor, postID, imageID, imageOrigin, reactionType)
+	if err != nil {
+		return reaction, err
+	}
+	return reaction, reaction.Reactor.setImageKey()
 }
 
 type RealMojiWithReactor struct {
