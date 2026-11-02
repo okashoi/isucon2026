@@ -166,30 +166,16 @@ func deleteRealMojiHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		actor := GetSession(c).UserID
-		tx, err := h.DB.BeginTxx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		var record struct {
-			ReactorID string `db:"reactor_id"`
-			AuthorID  string `db:"author_id"`
-		}
-		err = tx.GetContext(ctx, &record, `SELECT r.reactor_id,p.author_id FROM realmojis r JOIN posts p ON p.id=r.post_id WHERE r.id=$1 AND r.deleted_at IS NULL FOR UPDATE OF r`, input.RealMojiID)
+		var ok bool
+		err := h.DB.GetContext(ctx, &ok, `WITH t AS (SELECT r.id,(r.reactor_id=$2 OR p.author_id=$2) AS ok FROM realmojis r JOIN posts p ON p.id=r.post_id WHERE r.id=$1 AND r.deleted_at IS NULL FOR UPDATE OF r), u AS (UPDATE realmojis SET deleted_at=clock_timestamp() WHERE id IN (SELECT id FROM t WHERE ok)) SELECT ok FROM t`, input.RealMojiID, actor)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusNotFound, "interaction_not_found")
 		}
 		if err != nil {
 			return err
 		}
-		if actor != record.ReactorID && actor != record.AuthorID {
+		if !ok {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE realmojis SET deleted_at=clock_timestamp() WHERE id=$1`, input.RealMojiID); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
 		}
 		return c.NoContent(http.StatusNoContent)
 	}
