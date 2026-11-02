@@ -59,7 +59,10 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 			SecretKeyHash string `db:"secret_key_hash"`
 			Visible       bool   `db:"visible"`
 		}
-		err = h.ReadDB.GetContext(ctx, &object, `
+		// 可視の結果だけを imageVisibleTTL のあいだ使う。削除の拒否は 5 秒以内でよい。
+		if v, ok := imageVisibleCache.Load(input.ImageID); ok && time.Since(v.(imageVisible).fetchedAt) < imageVisibleTTL {
+			object.SecretKeyHash, object.Visible = v.(imageVisible).secretKeyHash, true
+		} else if err = h.ReadDB.GetContext(ctx, &object, `
    SELECT u.secret_key_hash, (
      COALESCE(u.profile_image_id = $2, false)
      OR EXISTS (
@@ -75,7 +78,9 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
    ) AS visible
    FROM users u
    WHERE u.id = $1 AND u.status = 'active'
-  `, preparedQuery, meta.OwnerUserID, input.ImageID)
+  `, preparedQuery, meta.OwnerUserID, input.ImageID); err == nil && object.Visible {
+			imageVisibleCache.Store(input.ImageID, imageVisible{object.SecretKeyHash, time.Now()})
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}
@@ -120,8 +125,21 @@ type imageMeta struct {
 // id だけの検索は全パーティションをロックして LockManager の待ちになる。行は初期化でしか消えない。
 var imageMetaCache sync.Map
 
+// imageVisibleCache は画像 ID ごとの、可視と判定した時刻と所有者の secret_key_hash。
+// secret_key_hash は変わらないので、署名は毎回このハッシュで確かめる。
+// standby の遅延 (≤1s) を足しても 5 秒以内に収まる TTL にする。
+var imageVisibleCache sync.Map
+
+const imageVisibleTTL = 3 * time.Second
+
+type imageVisible struct {
+	secretKeyHash string
+	fetchedAt     time.Time
+}
+
 func clearImageMetaCache() {
 	imageMetaCache.Clear()
+	imageVisibleCache.Clear()
 }
 
 func loadImageMeta(ctx context.Context, db sqlx.QueryerContext, imageID string) (imageMeta, error) {
