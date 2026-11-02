@@ -302,4 +302,71 @@ BEGIN
 END;
 $$;
 
+-- canComment と同じ判定をペアのロックの下で行い、通れば書く。不可なら行を返さない。
+-- 作者本人以外は、期間中・本日投稿済み・ブロックなしのうえで public か友達。友達の友達は対象外なので集計しない。
+CREATE OR REPLACE FUNCTION create_comment(
+  p_actor text,
+  p_post_id text,
+  p_body text,
+  OUT new_comment comments,
+  OUT author users
+) RETURNS SETOF record LANGUAGE plpgsql AS $$
+DECLARE
+  v_post_author text;
+  v_visibility text;
+BEGIN
+  SELECT author_id INTO v_post_author FROM posts WHERE id = p_post_id AND deleted_at IS NULL;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(user_pair_advisory_key(p_actor, v_post_author));
+  PERFORM 1 FROM users WHERE id IN (p_actor, v_post_author) AND status = 'active' ORDER BY id FOR KEY SHARE;
+
+  SELECT p.visibility INTO v_visibility
+  FROM posts p
+  JOIN posting_windows w ON w.id = p.posting_window_id AND w.ended_at IS NULL
+  JOIN users u ON u.id = p.author_id AND u.status = 'active'
+  WHERE p.id = p_post_id AND p.deleted_at IS NULL;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  SELECT * INTO author FROM users WHERE id = p_actor AND status = 'active';
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM posts p
+    JOIN posting_windows posted ON posted.id = p.posting_window_id
+    JOIN posting_windows cur ON cur.region = author.region AND cur.ended_at IS NULL AND cur.local_date = posted.local_date
+    WHERE p.author_id = p_actor AND p.deleted_at IS NULL
+  ) THEN
+    RETURN;
+  END IF;
+
+  IF p_actor <> v_post_author THEN
+    IF EXISTS (
+      SELECT 1 FROM block_relations
+      WHERE (blocker_id = p_actor AND blocked_id = v_post_author) OR (blocker_id = v_post_author AND blocked_id = p_actor)
+    ) THEN
+      RETURN;
+    END IF;
+    IF v_visibility <> 'public' AND NOT (v_visibility IN ('friends', 'friends_of_friends') AND EXISTS (
+      SELECT 1 FROM friendships
+      WHERE (user_low_id = p_actor AND user_high_id = v_post_author) OR (user_low_id = v_post_author AND user_high_id = p_actor)
+    )) THEN
+      RETURN;
+    END IF;
+  END IF;
+
+  INSERT INTO comments (id, post_id, author_id, body, created_at)
+  VALUES (gen_random_uuid(), p_post_id, p_actor, p_body, clock_timestamp())
+  RETURNING * INTO new_comment;
+
+  RETURN NEXT;
+END;
+$$;
+
 COMMIT;

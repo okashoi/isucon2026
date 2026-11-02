@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
 
@@ -36,46 +35,14 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_interaction")
 		}
 		ctx := c.Request().Context()
-		actor := GetSession(c).UserID
-		post, err := getPost(ctx, h.DB, input.PostID)
+		comment, err := createComment(ctx, h.DB, GetSession(c).UserID, input.PostID, input.Body)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
 		if err != nil {
 			return err
 		}
-		tx, err := h.DB.BeginTxx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		// 在籍は canComment が判定する。
-		if _, err := lockUserPair(ctx, tx, actor, post.AuthorID); err != nil {
-			return err
-		}
-		allowed, err := canComment(ctx, tx, actor, post.ID)
-		if err != nil {
-			return err
-		}
-		if !allowed {
-			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
-		}
-		id := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id,post_id,author_id,body,created_at) VALUES($1,$2,$3,$4,clock_timestamp())`, id, post.ID, actor, input.Body); err != nil {
-			return err
-		}
-		comment, err := getComment(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		user, err := getUser(ctx, tx, actor)
-		if err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		return c.JSON(http.StatusCreated, newCommentResponse(comment, user))
+		return c.JSON(http.StatusCreated, newCommentResponse(comment.Comment, comment.Author))
 	}
 }
 
