@@ -11,7 +11,8 @@ import (
 )
 
 // アプリ3台の primary 向け合計が s4 の max_connections（300）に収まるようにする。
-const maxDBConns = 100
+// 300 のうち 3 本は superuser_reserved_connections で、s4 のアプリも接続するので 3 台で 300 を使い切らない。
+const maxDBConns = 95
 
 type HandlerContext struct {
 	DB         *sqlx.DB // primary（書き込み・TX・initialize）
