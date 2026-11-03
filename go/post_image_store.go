@@ -26,9 +26,10 @@ type PostImageStore struct {
 	dir string
 	// 実行中に書き込んだ画像と、DB や他のサーバから読んだ画像。初期化で消す。
 	runtimeDir string
-	mu         sync.Mutex
-	region     string
-	peerURLs   map[string]string
+	// mu は Clear（書き込み）と Save 系（読み取り）だけを排他する。Save 同士は並行に書ける。
+	mu       sync.RWMutex
+	region   string
+	peerURLs map[string]string
 }
 
 func NewPostImageStore(region string, peerURLs map[string]string) (*PostImageStore, error) {
@@ -84,66 +85,63 @@ func (s *PostImageStore) Read(id string) ([]byte, error) {
 
 // Save は実行中に得た画像を置く。初期化で消える。
 func (s *PostImageStore) Save(id string, data []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return save(s.runtimeDir, id, data)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return save(s.runtimeDir, id, data, false)
 }
 
 // SaveOrigin は DB にバイト列を書かない画像を置く。この置き場所が唯一の実体なので、
 // 再起動後も残るように fsync してから返す。
 func (s *PostImageStore) SaveOrigin(id string, data []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	path, err := imageFilePath(s.runtimeDir, id)
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	d, err := os.Open(s.runtimeDir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return save(s.runtimeDir, id, data, true)
 }
 
 // Remove は投稿が確定しなかった画像を消す。
 func (s *PostImageStore) Remove(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if path, err := imageFilePath(s.runtimeDir, id); err == nil {
 		_ = os.Remove(path)
 	}
 }
 
-func save(dir, id string, data []byte) error {
+// save は dir 内の一意な一時ファイルに書いて rename する。durable なら fsync してディレクトリも fsync する。
+func save(dir, id string, data []byte, durable bool) error {
 	path, err := imageFilePath(dir, id)
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	f, err := os.CreateTemp(dir, id+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if err == nil && durable {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp, 0o644)
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if !durable {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // Clear は実行中に置いた画像を消す。初期データの画像は残す。
@@ -307,9 +305,9 @@ func (s *PostImageStore) loadFromDB(ctx context.Context, db *sqlx.DB, ids []stri
 }
 
 func (s *PostImageStore) store(dir, id string, data []byte, out map[string][]byte) error {
-	s.mu.Lock()
-	err := save(dir, id, data)
-	s.mu.Unlock()
+	s.mu.RLock()
+	err := save(dir, id, data, false)
+	s.mu.RUnlock()
 	if err != nil {
 		return err
 	}
