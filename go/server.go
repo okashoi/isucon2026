@@ -3,6 +3,7 @@ package isureal
 import (
 	"context"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -13,9 +14,14 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// アプリ3台の primary 向け合計が s4 の max_connections（300）に収まるようにする。
-// 300 のうち 3 本は superuser_reserved_connections で、s4 のアプリも接続するので 3 台で 300 を使い切らない。
-const maxDBConns = 95
+// アプリ3台の primary 向け合計が s4 の max_connections（300、うち 3 本は superuser 用）に収まるようにする。
+// asia1 は書き込みと読み取りを別の pool にするので、ISUREAL_DB_MAX_CONNS で pool ごとの本数を下げる。
+var maxDBConns = func() int {
+	if n, err := strconv.Atoi(os.Getenv("ISUREAL_DB_MAX_CONNS")); err == nil && n > 0 {
+		return n
+	}
+	return 95
+}()
 
 type HandlerContext struct {
 	DB         *sqlx.DB // primary（書き込み・TX・initialize）
