@@ -74,6 +74,7 @@ func (c *SessionCache) Replace(generation uint64, session Session) {
 }
 
 func (c *SessionCache) PurgeUser(userID string) {
+	purgeImageVisibleOwner(userID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.purgeUserLocked(userID)
@@ -87,6 +88,7 @@ func (c *SessionCache) purgeUserLocked(userID string) {
 }
 
 func (c *SessionCache) PurgeAll() {
+	purgeImageVisibleAll()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.generation++

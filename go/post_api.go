@@ -315,6 +315,7 @@ func deletePostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		purgeImageVisibleOwner(userID)
 		return c.NoContent(http.StatusNoContent)
 	}
 }

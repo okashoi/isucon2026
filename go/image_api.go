@@ -60,15 +60,22 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 			Visible       bool   `db:"visible"`
 		}
 		// 可視の結果だけを imageVisibleTTL のあいだ使う。削除の拒否は 5 秒以内でよい。
-		if v, ok := imageVisibleCache.Load(input.ImageID); ok && time.Since(v.(imageVisible).fetchedAt) < imageVisibleTTL {
+		// 自リージョンの所有者の投稿画像は、可否を変える操作（投稿削除・退会・リージョン移動）が
+		// すべてこのサーバを通るので、purgeImageVisibleOwner までずっと使う。
+		if v, ok := imageVisibleCache.Load(input.ImageID); ok && imageVisibleValid(v.(imageVisible)) {
 			object.SecretKeyHash, object.Visible = v.(imageVisible).secretKeyHash, true
-		} else if err = h.ReadDB.GetContext(ctx, &object, `
-   SELECT u.secret_key_hash, (
-     COALESCE(u.profile_image_id = $2, false)
-     OR EXISTS (
-       SELECT 1 FROM posts p
-       WHERE p.image_id = $2 AND p.author_id = u.id AND p.deleted_at IS NULL
-     )
+		} else {
+			epoch := imageVisibleEpoch()
+			var row struct {
+				SecretKeyHash string `db:"secret_key_hash"`
+				Visible       bool   `db:"visible"`
+				Region        string `db:"region"`
+				Posted        bool   `db:"posted"`
+			}
+			if err = h.ReadDB.GetContext(ctx, &row, `
+   SELECT u.secret_key_hash, u.region, q.posted, (
+     q.posted
+     OR COALESCE(u.profile_image_id = $2, false)
      OR EXISTS (
        SELECT 1 FROM realmojis r
        JOIN posts p ON p.id = r.post_id AND p.deleted_at IS NULL
@@ -76,10 +83,18 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
        WHERE r.image_id = $2 AND r.reactor_id = u.id AND r.replaced_at IS NULL AND r.deleted_at IS NULL
      )
    ) AS visible
-   FROM users u
+   FROM users u CROSS JOIN LATERAL (
+     SELECT EXISTS (
+       SELECT 1 FROM posts p
+       WHERE p.image_id = $2 AND p.author_id = u.id AND p.deleted_at IS NULL
+     ) AS posted
+   ) q
    WHERE u.id = $1 AND u.status = 'active'
-  `, preparedQuery, meta.OwnerUserID, input.ImageID); err == nil && object.Visible {
-			imageVisibleCache.Store(input.ImageID, imageVisible{object.SecretKeyHash, time.Now()})
+  `, preparedQuery, meta.OwnerUserID, input.ImageID); err == nil && row.Visible {
+				storeImageVisible(input.ImageID, imageVisible{secretKeyHash: row.SecretKeyHash, fetchedAt: time.Now(), owner: meta.OwnerUserID},
+					row.Posted && row.Region == h.Config.Region, epoch)
+			}
+			object.SecretKeyHash, object.Visible = row.SecretKeyHash, row.Visible
 		}
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
@@ -135,11 +150,68 @@ const imageVisibleTTL = 3 * time.Second
 type imageVisible struct {
 	secretKeyHash string
 	fetchedAt     time.Time
+	owner         string
+	pinned        bool
+	epoch         uint64 // pinned のときの保存時の imageVisPin.epoch
+}
+
+// imageVisPin は pinned の項目の破棄を所有者ごとに数える。破棄は purgedAt を進めるだけで、
+// 項目は epoch が所有者の purgedAt と purgedAllAt 以上のあいだ有効。
+var imageVisPin = struct {
+	sync.Mutex
+	epoch       uint64
+	purgedAt    map[string]uint64
+	purgedAllAt uint64
+}{purgedAt: map[string]uint64{}}
+
+func imageVisibleEpoch() uint64 {
+	imageVisPin.Lock()
+	defer imageVisPin.Unlock()
+	return imageVisPin.epoch
+}
+
+func imageVisibleValid(v imageVisible) bool {
+	if time.Since(v.fetchedAt) < imageVisibleTTL {
+		return true
+	}
+	if !v.pinned {
+		return false
+	}
+	imageVisPin.Lock()
+	defer imageVisPin.Unlock()
+	return v.epoch >= imageVisPin.purgedAt[v.owner] && v.epoch >= imageVisPin.purgedAllAt
+}
+
+// storeImageVisible は readEpoch（DB を読む前の imageVisibleEpoch）より後に所有者の破棄があれば pin しない。
+func storeImageVisible(imageID string, v imageVisible, pin bool, readEpoch uint64) {
+	imageVisPin.Lock()
+	defer imageVisPin.Unlock()
+	if pin && imageVisPin.purgedAt[v.owner] <= readEpoch && imageVisPin.purgedAllAt <= readEpoch {
+		v.pinned, v.epoch = true, imageVisPin.epoch
+	}
+	imageVisibleCache.Store(imageID, v)
+}
+
+// purgeImageVisibleOwner は所有者の画像の可否を変える変更の commit 後に呼ぶ。
+func purgeImageVisibleOwner(owner string) {
+	imageVisPin.Lock()
+	defer imageVisPin.Unlock()
+	imageVisPin.epoch++
+	imageVisPin.purgedAt[owner] = imageVisPin.epoch
+}
+
+func purgeImageVisibleAll() {
+	imageVisPin.Lock()
+	defer imageVisPin.Unlock()
+	imageVisPin.epoch++
+	clear(imageVisPin.purgedAt)
+	imageVisPin.purgedAllAt = imageVisPin.epoch
 }
 
 func clearImageMetaCache() {
 	imageMetaCache.Clear()
 	imageVisibleCache.Clear()
+	purgeImageVisibleAll()
 }
 
 func loadImageMeta(ctx context.Context, db sqlx.QueryerContext, imageID string) (imageMeta, error) {
