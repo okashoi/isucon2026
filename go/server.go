@@ -99,6 +99,10 @@ func NewServer(config *Config) *echo.Echo {
 	readDB := db
 	if config.DBReadHost != "" {
 		readDB = openDB(config.DatabaseReadDSN())
+		if n, err := strconv.Atoi(os.Getenv("ISUREAL_DB_READ_MAX_CONNS")); err == nil && n > 0 {
+			readDB.SetMaxOpenConns(n)
+			readDB.SetMaxIdleConns(n)
+		}
 	}
 
 	postImages, err := NewPostImageStore(config.Region, config.PeerURLs)
